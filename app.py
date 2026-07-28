@@ -1,5 +1,6 @@
 import os, time, uuid, json, re, requests, pandas as pd
 import streamlit as st
+from streamlit_lottie import st_lottie
 import streamlit.components.v1 as components
 from supabase import create_client, Client
 
@@ -792,16 +793,43 @@ if not show_admin:
         else: st.error("Enter MC Number first.")
 
     if b2.button("🛑 STOP Engine", use_container_width=True):
+    lottie_container.empty()  # Clear truck animation
         st.session_state.running = False
         st.success("Stopped harvesting engine.")
 
     if b3.button("🗑️ Clear Data", use_container_width=True):
+    lottie_container.empty()  # Clear truck animation
         st.session_state.scraped_rows = []
         st.rerun()
 
     status_box = st.empty()
 
+# ─── TRUCK ANIMATION ─────────────────────────────────────────────────────
+# 🚛 Replace this URL with your own Lottie animation:
+#    1. Go to https://lottiefiles.com/free-animation/logistics-trucks-DHvuLcYVdQ
+#    2. Click "Use this animation in HTML" 
+#    3. Copy the Lottie JSON URL and paste it below
+TRUCK_LOTTIE_URL = "https://lottie.host/4b880071-0e7a-4e93-94a6-0311479e1f2a/2i2l1l2l2l.json"  # ← REPLACE THIS
+
+lottie_container = st.empty()
+
+
     if st.session_state.running and st.session_state.current_mc != "":
+    # Show truck animation
+    with lottie_container.container():
+        cols = st.columns([1, 2, 1])
+        with cols[1]:
+            st_lottie(
+                TRUCK_LOTTIE_URL,
+                speed=1.5,
+                reverse=False,
+                loop=True,
+                quality="high",
+                height=200,
+                key="truck_running"
+            )
+            st.markdown("<p style='text-align:center;color:#00f5d4;font-weight:600;'>🚛 Engine Running...</p>", unsafe_allow_html=True)
+
         current_mc_val = int(st.session_state.current_mc)
         
         status_box.info(f"🔄 **Live Progress:** Processing **MC-{current_mc_val}**...")
