@@ -252,17 +252,38 @@ def parse_carrier_data(mc_number, status_code, raw_data):
         "carrier_type", "type", "authority_type"
     ]) or "").upper()
 
-    broker_auth = find_val_by_keys(c, ["broker_authority_status", "brokerAuthStatus", "broker_authority", "brokerAuthority"])
-    is_broker_auth = str(broker_auth).upper() in ["Y", "ACTIVE", "AUTHORIZED", "TRUE", "A"]
+    # ═══════════════════════════════════════════════════════
+    # FIXED: BROKER VS CARRIER DETECTION
+    # ═══════════════════════════════════════════════════════
+    def _has_broker_key(d, depth=0):
+        if not isinstance(d, dict) or depth > 5:
+            return False
+        broker_keys = ["broker_authority_status", "brokerAuthStatus", "broker_authority",
+                       "brokerAuthority", "broker_status", "is_broker", "broker_type"]
+        for k in d.keys():
+            if any(bk.lower() in k.lower() for bk in broker_keys):
+                return True
+            v = d[k]
+            if isinstance(v, dict) and _has_broker_key(v, depth+1):
+                return True
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict) and _has_broker_key(item, depth+1):
+                        return True
+        return False
 
-    c_text = json.dumps(c).upper()
+    broker_auth = find_val_by_keys(c, ["broker_authority_status", "brokerAuthStatus", "broker_authority", "brokerAuthority"])
+    is_broker_auth = str(broker_auth).upper() in ["Y", "ACTIVE", "AUTHORIZED", "TRUE", "A", "YES"]
+    has_broker_fields = _has_broker_key(c)
+
+    known_broker_names = ["BROKER", "BROKERAGE", "3PL", "GLOBAL LOGISTICS", "ECHO GLOBAL",
+                          "CH ROBINSON", "TQL", "TOTAL QUALITY LOGISTICS", "RXO", "COYOTE", "UBER FREIGHT"]
+
     is_broker = (
         is_broker_auth or
+        has_broker_fields or
         "BROKER" in entity_val or
-        any(b in name for b in [
-            "BROKER", "BROKERAGE", "3PL", "GLOBAL LOGISTICS", "ECHO GLOBAL", 
-            "CH ROBINSON", "TQL", "RXO", "COYOTE", "UBER FREIGHT"
-        ])
+        any(b in name for b in known_broker_names)
     )
     entity_label = "BROKER" if is_broker else "CARRIER"
 
@@ -277,6 +298,20 @@ def parse_carrier_data(mc_number, status_code, raw_data):
                     else: vals.append(str(item))
             else: vals.append(str(v))
         return vals
+
+        broker_keys = ["broker_authority_status", "brokerAuthStatus", "broker_authority",
+                       "brokerAuthority", "broker_status", "is_broker", "broker_type"]
+        for k in d.keys():
+            if any(bk.lower() in k.lower() for bk in broker_keys):
+                return True
+            v = d[k]
+            if isinstance(v, dict) and has_broker_field(v):
+                return True
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict) and has_broker_field(item):
+                        return True
+        return False
 
     all_payload_text = " ".join(flatten_dict_values(c)).upper()
 
@@ -560,7 +595,7 @@ if not show_admin:
         if len(filtered_df) == 0 and len(base_df) > 0:
             st.warning("⚠️ Your filters are hiding all records. Click **'🔄 Reset Filters'** above or change your filter selections to view them.")
 
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 Complete Master Log", "🎯 Verified Leads (Active Only)", "📧 Raw Active Email List", "🛠️ API Raw Response Inspector"])
+        tab1, tab2, tab3 = st.tabs(["📋 Complete Master Log", "🎯 Verified Leads (Active Only)", "📧 Raw Active Email List"])
         
         with tab1:
             display_df = filtered_df.drop(columns=["Raw Payload"], errors="ignore")
@@ -585,13 +620,6 @@ if not show_admin:
             st.text_area("Copy Emails:", value="\n".join(emails.tolist()), height=140)
             st.download_button("📥 Export Emails CSV", pd.DataFrame({"Email Address": emails}).to_csv(index=False).encode('utf-8'), "Active_Emails.csv", "text/csv", use_container_width=True)
 
-        with tab4:
-            st.subheader("🔍 Inspect Raw CarrierChk API JSON Payload")
-            selected_mc_inspect = st.selectbox("Select MC Record to Inspect:", filtered_df["MC Number"].tolist() if not filtered_df.empty else [])
-            if selected_mc_inspect:
-                match_row = filtered_df[filtered_df["MC Number"] == selected_mc_inspect]
-                if not match_row.empty:
-                    raw_p = match_row.iloc[0].get("Raw Payload")
-                    st.json(raw_p)
+
     else:
         st.info("No records collected yet. Click 'Start Live Engine' to begin harvesting.")
