@@ -208,75 +208,65 @@ def parse_carrier_data(mc_number, status_code, raw_data):
             "Raw Payload": raw_data
         }
 
-    # ═══════════════════════════════════════════════════════
-    # FIXED: ROBUST OPERATING STATUS DETECTION
-    # ═══════════════════════════════════════════════════════
+    # --- 1. ROBUST MULTI-TIER OPERATING STATUS DETECTION ---
     status_raw = str(find_val_by_keys(c, [
-        "status", "operating_status", "carrier_status", "authority_status",
-        "common_authority_status", "contract_authority_status", "commonStatus", "contractStatus",
-        "operatingAuthorityStatus", "carrierOperatingStatus"
+        "status", "operating_status", "carrier_status", "authority_status", 
+        "common_authority_status", "contract_authority_status", "commonStatus", "contractStatus"
     ]) or "").upper().strip()
+    
+    allowed_val = find_val_by_keys(c, [
+        "allowed_to_operate", "allowedToOperate", "active", "is_active", 
+        "common_allowed_to_operate", "contract_allowed_to_operate"
+    ])
+    allowed_str = str(allowed_val).upper().strip() if allowed_val is not None else ""
 
-    is_active = None
+    inactive_keywords = [
+        "INACTIVE", "REVOKED", "SUSPENDED", "CANCELED", "CANCELLED", 
+        "DENIED", "NOT AUTHORIZED", "OUT OF SERVICE", "NO AUTHORITY", "NOT ACTIVE", "I"
+    ]
+    
+    active_keywords = [
+        "ACTIVE", "AUTHORIZED", "AUTH", "YES", "TRUE", "OPERATING"
+    ]
 
-    if status_raw:
-        inactive_exact = ["INACTIVE", "REVOKED", "SUSPENDED", "CANCELED", "CANCELLED",
-                          "DENIED", "NOT AUTHORIZED", "OUT OF SERVICE", "NO AUTHORITY",
-                          "NOT ACTIVE", "UNAUTHORIZED"]
-        if any(kw == status_raw or kw in status_raw for kw in inactive_exact):
-            is_active = False
-        elif any(kw in status_raw for kw in ["ACTIVE", "AUTHORIZED", "OPERATING"]):
-            is_active = True
-        else:
-            is_active = False
+    is_active = False
 
-    if is_active is None:
-        allowed_val = find_val_by_keys(c, [
-            "allowed_to_operate", "allowedToOperate", "is_active",
-            "common_allowed_to_operate", "contract_allowed_to_operate"
-        ])
-        if allowed_val is True or str(allowed_val).upper() in ["Y", "YES", "TRUE", "1", "ACTIVE"]:
-            is_active = True
-        elif allowed_val is False or str(allowed_val).upper() in ["N", "NO", "FALSE", "0", "INACTIVE"]:
-            is_active = False
-
-    if is_active is None:
+    if any(kw in status_raw for kw in inactive_keywords) or allowed_val is False or allowed_str in ["N", "NO", "FALSE", "0", "INACTIVE", "REVOKED"]:
+        is_active = False
+    elif any(kw in status_raw for kw in active_keywords) or status_raw in ["A", "Y"] or allowed_val is True or allowed_str in ["Y", "YES", "TRUE", "1", "ACTIVE", "AUTHORIZED", "A"]:
+        is_active = True
+    else:
         payload_text = json.dumps(c).upper()
-        inactive_signals = ["NOT AUTHORIZED", "AUTHORITY REVOKED", "SUSPENDED",
-                           "INACTIVE", "OUT OF SERVICE", "CANCELED", "NOT ACTIVE",
-                           "UNAUTHORIZED", "AUTHORITY DENIED"]
-        if any(term in payload_text for term in inactive_signals):
+        if any(term in payload_text for term in ["NOT AUTHORIZED", "REVOKED", "SUSPENDED", "INACTIVE", "OUT OF SERVICE"]):
             is_active = False
-        elif any(term in payload_text for term in ["ACTIVE AUTHORITY", "AUTHORIZED TO OPERATE"]):
+        elif any(term in payload_text for term in ["AUTHORIZED", "ACTIVE", "COMMON AUTHORITY", "CONTRACT AUTHORITY"]):
             is_active = True
         else:
             is_active = False
 
     status_str = "🟢 ACTIVE" if is_active else "🔴 INACTIVE"
 
-    # ═══════════════════════════════════════════════════════
-    # FIXED: BROKER VS CARRIER DETECTION
-    # ═══════════════════════════════════════════════════════
+    # --- 2. ACCURATE BROKER VS CARRIER DETECTION ---
     entity_val = str(find_val_by_keys(c, [
-        "entity_type", "entitytype", "operating_type", "operatingtype",
+        "entity_type", "entitytype", "operating_type", "operatingtype", 
         "carrier_type", "type", "authority_type"
     ]) or "").upper()
 
-    broker_auth = find_val_by_keys(c, ["broker_authority_status", "brokerAuthStatus",
-                                        "broker_authority", "brokerAuthority"])
-    is_broker_auth = str(broker_auth).upper() in ["Y", "ACTIVE", "AUTHORIZED", "TRUE", "A", "YES"]
+    broker_auth = find_val_by_keys(c, ["broker_authority_status", "brokerAuthStatus", "broker_authority", "brokerAuthority"])
+    is_broker_auth = str(broker_auth).upper() in ["Y", "ACTIVE", "AUTHORIZED", "TRUE", "A"]
 
-    known_broker_names = ["BROKER", "BROKERAGE", "3PL", "GLOBAL LOGISTICS", "ECHO GLOBAL",
-                          "CH ROBINSON", "TQL", "RXO", "COYOTE", "UBER FREIGHT"]
-
+    c_text = json.dumps(c).upper()
     is_broker = (
         is_broker_auth or
         "BROKER" in entity_val or
-        any(b in name for b in known_broker_names)
+        any(b in name for b in [
+            "BROKER", "BROKERAGE", "3PL", "GLOBAL LOGISTICS", "ECHO GLOBAL", 
+            "CH ROBINSON", "TQL", "RXO", "COYOTE", "UBER FREIGHT"
+        ])
     )
     entity_label = "BROKER" if is_broker else "CARRIER"
 
-    # --- CONTACT INFO & LOCATION ---
+    # --- 3. CONTACT INFO & LOCATION ---
     def flatten_dict_values(d):
         vals = []
         for v in d.values():
@@ -291,10 +281,10 @@ def parse_carrier_data(mc_number, status_code, raw_data):
     all_payload_text = " ".join(flatten_dict_values(c)).upper()
 
     phone = str(find_val_by_keys(c, ["phone", "cell_phone", "telephone", "phone_number"]) or "N/A").strip()
-    if phone.lower() in ["none", "null", "", "not listed"]: phone = "N/A"
+    if phone.lower() in ["none", "null", ""]: phone = "N/A"
 
     email = str(find_val_by_keys(c, ["email_address", "email", "emailaddress"]) or "").strip()
-    if not email or email.lower() in ["none", "null", "not listed", "", "n/a"]:
+    if not email or email.lower() in ["none", "null", "not listed", ""]:
         emails_found = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', all_payload_text)
         valid_emails = [e for e in emails_found if not any(x in e.lower() for x in ["carrierchk", "example.com"])]
         email = valid_emails[0] if valid_emails else "Not Listed"
@@ -497,21 +487,28 @@ if not show_admin:
         current_mc_val = int(st.session_state.current_mc)
         
         # ═══════════════════════════════════════════════════════
-        # 🏃 RUNNING PERSON ANIMATION (Pure CSS - No External Dependencies)
+        # SLEEK LIVE HARVESTING INDICATOR
         # ═══════════════════════════════════════════════════════
-        anim_cols = st.columns([1, 2, 1])
-        with anim_cols[1]:
-            st.markdown("""
-            <div style="text-align:center;padding:1.5rem 0;background:transparent;">
-                <div class="runner" style="font-size:5rem;display:inline-block;">🏃</div>
-                <p style="color:#00f5d4;font-weight:700;font-size:1.2rem;margin-top:0.5rem;text-shadow:0 0 20px rgba(0,245,212,0.4);">Engine Running...</p>
+        st.markdown(f"""
+        <div style="margin:1rem 0;padding:1.5rem 2rem;background:rgba(0,245,212,0.05);border:1px solid rgba(0,245,212,0.15);border-radius:16px;text-align:center;">
+            <div style="display:flex;align-items:center;justify-content:center;gap:1rem;margin-bottom:0.8rem;">
+                <div class="pulse-dot" style="width:12px;height:12px;background:#00f5d4;border-radius:50%;box-shadow:0 0 15px #00f5d4;"></div>
+                <span style="color:#00f5d4;font-weight:700;font-size:1.1rem;letter-spacing:1px;text-transform:uppercase;">Live Harvesting Active</span>
+                <div class="pulse-dot" style="width:12px;height:12px;background:#00f5d4;border-radius:50%;box-shadow:0 0 15px #00f5d4;"></div>
             </div>
-            <style>
-                .runner { animation: run-bounce 0.5s ease-in-out infinite, run-slide 1.5s linear infinite; filter: drop-shadow(0 0 15px rgba(0,245,212,0.5)); }
-                @keyframes run-bounce { 0%,100% { transform: translateY(0) scaleX(1); } 25% { transform: translateY(-15px) scaleX(1.1); } 50% { transform: translateY(0) scaleX(1); } 75% { transform: translateY(-10px) scaleX(0.95); } }
-                @keyframes run-slide { 0% { transform: translateX(-40px); } 50% { transform: translateX(40px); } 100% { transform: translateX(-40px); } }
-            </style>
-            """, unsafe_allow_html=True)
+            <div style="width:100%;height:4px;background:rgba(255,255,255,0.05);border-radius:2px;overflow:hidden;margin-bottom:0.8rem;">
+                <div class="shimmer-bar" style="height:100%;width:40%;background:linear-gradient(90deg,transparent,#00f5d4,transparent);border-radius:2px;"></div>
+            </div>
+            <p style="color:rgba(255,255,255,0.5);font-size:0.9rem;font-family:monospace;">Processing MC-{current_mc_val} • {{len(st.session_state.scraped_rows)}} records collected</p>
+        </div>
+        <style>
+            .pulse-dot {{ animation: pulse 1.2s ease-in-out infinite; }}
+            .pulse-dot:nth-child(3) {{ animation-delay: 0.6s; }}
+            @keyframes pulse {{ 0%,100% {{ opacity: 0.3; transform: scale(0.8); }} 50% {{ opacity: 1; transform: scale(1.2); }} }}
+            .shimmer-bar {{ animation: shimmer 1.5s linear infinite; }}
+            @keyframes shimmer {{ 0% {{ transform: translateX(-150%); }} 100% {{ transform: translateX(350%); }} }}
+        </style>
+        """, unsafe_allow_html=True)
         
         status_box.info(f"🔄 **Live Progress:** Processing **MC-{current_mc_val}**...")
 
