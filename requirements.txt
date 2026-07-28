@@ -1,4 +1,5 @@
-streamlit
-requests
-pandas
-supabase
+streamlit>=1.28.0
+requests>=2.31.0
+pandas>=2.0.0
+supabase>=2.0.0
+streamlit-lottie>=0.0.5
