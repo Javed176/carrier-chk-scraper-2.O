@@ -499,28 +499,37 @@ if not show_admin:
     # 🚛 LOTTIE TRUCK ANIMATION
     # Replace URL below with your own from https://lottiefiles.com
     # ═══════════════════════════════════════════════════════════════════════════
-    TRUCK_LOTTIE_URL = "https://lottie.host/https://lottiefiles.com/free-animation/logistics-trucks-DHvuLcYVdQ.json"
+    TRUCK_LOTTIE_URL = "https://assets7.lottiefiles.com/packages/lf20_7fCbvNSmFD.json"
     lottie_container = st.empty()
 
     if st.session_state.running and st.session_state.current_mc != "":
         
         # Show truck animation
-        with lottie_container.container():
-            cols = st.columns([1, 2, 1])
-            with cols[1]:
-                st_lottie(
-                    TRUCK_LOTTIE_URL,
-                    speed=1.5,
-                    reverse=False,
-                    loop=True,
-                    quality="high",
-                    height=200,
-                    key="truck_running"
-                )
-                st.markdown("<p style='text-align:center;color:#00f5d4;font-weight:600;font-size:1.1rem;'>🚛 Engine Running...</p>", unsafe_allow_html=True)
-        
-        current_mc_val = int(st.session_state.current_mc)
-        
+        # Show truck animation (with fallback)
+        try:
+            with lottie_container.container():
+                cols = st.columns([1, 2, 1])
+                with cols[1]:
+                    st_lottie(
+                        TRUCK_LOTTIE_URL,
+                        speed=1.5,
+                        reverse=False,
+                        loop=True,
+                        quality="high",
+                        height=200,
+                        key="truck_running"
+                    )
+                    st.markdown("<p style='text-align:center;color:#00f5d4;font-weight:600;font-size:1.1rem;'>🚛 Engine Running...</p>", unsafe_allow_html=True)
+        except Exception:
+            lottie_container.markdown("""
+            <div style="text-align:center;padding:2rem;">
+                <div style="font-size:4rem;animation:bounce 1s infinite;">🚛</div>
+                <p style="color:#00f5d4;font-weight:600;font-size:1.1rem;margin-top:1rem;">Engine Running...</p>
+            </div>
+            <style>
+                @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-15px)} }
+            </style>
+            """, unsafe_allow_html=True)
         status_box.info(f"🔄 **Live Progress:** Processing **MC-{current_mc_val}**...")
 
         status_code, raw_info = get_carrier_info(current_mc_val, CARRIER_TOKEN)
