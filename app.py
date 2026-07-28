@@ -6,346 +6,53 @@ from supabase import create_client, Client
 
 st.set_page_config(page_title="Carrier Automation Portal", layout="wide")
 
-
-# --- MODERN 3D GLASSMORPHISM STYLING ---
+# ═══════════════════════════════════════════════════════════════════════════
+# MODERN 3D GLASSMORPHISM THEME
+# ═══════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-
-    /* Animated gradient background */
-    .stApp {
-        background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
-        background-attachment: fixed;
-    }
-
-    /* Main title with 3D text effect */
-    .main-title {
-        font-family: 'Space Grotesk', sans-serif;
-        font-size: 3.2rem;
-        font-weight: 800;
-        text-align: center;
-        margin-bottom: 0.3rem;
-        background: linear-gradient(135deg, #00f5d4 0%, #00bbf9 50%, #9b5de5 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-        text-shadow: 0 0 60px rgba(0, 245, 212, 0.3);
-        letter-spacing: -1px;
-    }
-
-    .subtitle {
-        font-size: 1.05rem;
-        color: rgba(255,255,255,0.6);
-        text-align: center;
-        margin-bottom: 2rem;
-        max-width: 600px;
-        margin-left: auto;
-        margin-right: auto;
-        font-weight: 400;
-    }
-
-    /* Glassmorphism search container */
-    .search-container {
-        background: rgba(255, 255, 255, 0.05);
-        backdrop-filter: blur(20px);
-        -webkit-backdrop-filter: blur(20px);
-        border-radius: 24px;
-        padding: 2.5rem;
-        margin-bottom: 2rem;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), 
-                    inset 0 1px 0 rgba(255, 255, 255, 0.1);
-    }
-
-    /* 3D Info Cards */
-    .info-card {
-        background: rgba(255, 255, 255, 0.03);
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
-        border-radius: 20px;
-        padding: 1.8rem;
-        margin-bottom: 1.2rem;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2),
-                    0 0 0 1px rgba(255, 255, 255, 0.05);
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-
-    .info-card:hover {
-        transform: translateY(-4px) scale(1.01);
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3),
-                    0 0 30px rgba(0, 245, 212, 0.1);
-        border-color: rgba(0, 245, 212, 0.2);
-    }
-
-    .info-card h3 {
-        margin-top: 0;
-        margin-bottom: 1.2rem;
-        color: #fff;
-        font-size: 1.15rem;
-        font-weight: 700;
-        font-family: 'Space Grotesk', sans-serif;
-        border-bottom: 2px solid;
-        border-image: linear-gradient(90deg, #00f5d4, #9b5de5) 1;
-        padding-bottom: 0.7rem;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-
-    .info-row {
-        display: flex;
-        justify-content: space-between;
-        padding: 0.75rem 0;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    .info-row:last-child {
-        border-bottom: none;
-    }
-
-    .info-label {
-        color: rgba(255,255,255,0.5);
-        font-weight: 500;
-        font-size: 0.9rem;
-    }
-
-    .info-value {
-        color: #fff;
-        font-weight: 600;
-        text-align: right;
-        font-size: 0.95rem;
-    }
-
-    /* Status badges with glow */
-    .badge {
-        display: inline-block;
-        padding: 5px 14px;
-        border-radius: 50px;
-        font-size: 0.8rem;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-        text-transform: uppercase;
-    }
-
-    .badge-active {
-        background: rgba(0, 245, 212, 0.15);
-        color: #00f5d4;
-        border: 1px solid rgba(0, 245, 212, 0.3);
-        box-shadow: 0 0 15px rgba(0, 245, 212, 0.2);
-    }
-
-    .badge-inactive {
-        background: rgba(255, 71, 87, 0.15);
-        color: #ff4757;
-        border: 1px solid rgba(255, 71, 87, 0.3);
-        box-shadow: 0 0 15px rgba(255, 71, 87, 0.2);
-    }
-
-    .badge-pending {
-        background: rgba(255, 193, 7, 0.15);
-        color: #ffc107;
-        border: 1px solid rgba(255, 193, 7, 0.3);
-        box-shadow: 0 0 15px rgba(255, 193, 7, 0.2);
-    }
-
-    /* Risk banners */
-    .risk-green { color: #00f5d4; font-weight: 700; }
-    .risk-orange { color: #ffc107; font-weight: 700; }
-    .risk-red { color: #ff4757; font-weight: 700; }
-
-    /* Stats bar */
-    .stats-bar {
-        display: flex;
-        justify-content: center;
-        gap: 2.5rem;
-        margin: 2rem 0;
-        flex-wrap: wrap;
-    }
-
-    .stat-item {
-        display: flex;
-        align-items: center;
-        gap: 0.6rem;
-        color: rgba(255,255,255,0.6);
-        font-size: 0.9rem;
-        font-weight: 500;
-        background: rgba(255,255,255,0.05);
-        padding: 0.6rem 1.2rem;
-        border-radius: 12px;
-        border: 1px solid rgba(255,255,255,0.08);
-    }
-
-    .stat-icon { 
-        font-size: 1.1rem; 
-    }
-
-    /* Footer */
-    .footer {
-        text-align: center;
-        color: rgba(255,255,255,0.35);
-        font-size: 0.85rem;
-        margin-top: 3rem;
-        padding-top: 2rem;
-        border-top: 1px solid rgba(255,255,255,0.08);
-    }
-
-    /* Input styling */
-    div[data-baseweb="input"] > div {
-        background: rgba(255,255,255,0.05) !important;
-        border: 1px solid rgba(255,255,255,0.1) !important;
-        border-radius: 14px !important;
-        color: white !important;
-    }
-
-    div[data-baseweb="input"] > div:focus-within {
-        border-color: #00f5d4 !important;
-        box-shadow: 0 0 20px rgba(0, 245, 212, 0.15) !important;
-    }
-
-    /* Button glow */
-    .stButton > button {
-        border-radius: 14px !important;
-        font-weight: 600 !important;
-        letter-spacing: 0.5px !important;
-        transition: all 0.3s ease !important;
-        border: none !important;
-    }
-
-    .stButton > button:hover {
-        transform: translateY(-2px) !important;
-        box-shadow: 0 8px 25px rgba(0, 245, 212, 0.3) !important;
-    }
-
-    /* Primary button specific */
-    .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, #00f5d4 0%, #00bbf9 100%) !important;
-        color: #0f0c29 !important;
-    }
-
-    /* Secondary buttons */
-    .stButton > button[kind="secondary"] {
-        background: rgba(255,255,255,0.08) !important;
-        color: white !important;
-        border: 1px solid rgba(255,255,255,0.15) !important;
-    }
-
-    /* Tabs */
-    button[data-baseweb="tab"] {
-        color: rgba(255,255,255,0.5) !important;
-        font-weight: 600 !important;
-    }
-
-    button[data-baseweb="tab"][aria-selected="true"] {
-        color: #00f5d4 !important;
-    }
-
-    /* Dataframes */
-    .stDataFrame {
-        border-radius: 16px !important;
-        overflow: hidden !important;
-    }
-
-    /* Sidebar */
-    section[data-testid="stSidebar"] {
-        background: rgba(15, 12, 41, 0.95) !important;
-        backdrop-filter: blur(20px) !important;
-        border-right: 1px solid rgba(255,255,255,0.08) !important;
-    }
-
-    /* Expander */
-    details {
-        background: rgba(255,255,255,0.03) !important;
-        border: 1px solid rgba(255,255,255,0.08) !important;
-        border-radius: 16px !important;
-    }
-
-    /* Selectbox */
-    div[data-baseweb="select"] > div {
-        background: rgba(255,255,255,0.05) !important;
-        border: 1px solid rgba(255,255,255,0.1) !important;
-        border-radius: 12px !important;
-        color: white !important;
-    }
-
-    /* Number input */
-    div[data-baseweb="input"][type="number"] > div {
-        background: rgba(255,255,255,0.05) !important;
-        border: 1px solid rgba(255,255,255,0.1) !important;
-    }
-
-    /* Text area */
-    .stTextArea textarea {
-        background: rgba(255,255,255,0.05) !important;
-        border: 1px solid rgba(255,255,255,0.1) !important;
-        border-radius: 14px !important;
-        color: white !important;
-    }
-
-    /* Checkbox */
-    .stCheckbox label {
-        color: rgba(255,255,255,0.7) !important;
-    }
-
-    /* Metric */
-    div[data-testid="stMetric"] {
-        background: rgba(255,255,255,0.03) !important;
-        border-radius: 16px !important;
-        padding: 1rem !important;
-        border: 1px solid rgba(255,255,255,0.08) !important;
-    }
-
-    div[data-testid="stMetric"] label {
-        color: rgba(255,255,255,0.5) !important;
-    }
-
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        color: #00f5d4 !important;
-        font-weight: 700 !important;
-    }
-
-    /* Success/Error/Warning/Info boxes */
-    .stAlert {
-        border-radius: 16px !important;
-        border: 1px solid rgba(255,255,255,0.1) !important;
-    }
-
-    /* Caption */
-    .stCaption {
-        color: rgba(255,255,255,0.4) !important;
-    }
-
-    /* Download button */
-    .stDownloadButton button {
-        border-radius: 12px !important;
-        background: linear-gradient(135deg, #9b5de5 0%, #f15bb5 100%) !important;
-        color: white !important;
-        border: none !important;
-        font-weight: 600 !important;
-    }
-
-    /* Scrollbar */
-    ::-webkit-scrollbar {
-        width: 8px;
-        height: 8px;
-    }
-    ::-webkit-scrollbar-track {
-        background: rgba(255,255,255,0.02);
-    }
-    ::-webkit-scrollbar-thumb {
-        background: rgba(255,255,255,0.15);
-        border-radius: 4px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-        background: rgba(255,255,255,0.25);
-    }
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    .stApp { background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%); background-attachment: fixed; }
+    .main-title { font-family: 'Space Grotesk', sans-serif; font-size: 3.2rem; font-weight: 800; text-align: center; margin-bottom: 0.3rem; background: linear-gradient(135deg, #00f5d4 0%, #00bbf9 50%, #9b5de5 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; text-shadow: 0 0 60px rgba(0, 245, 212, 0.3); letter-spacing: -1px; }
+    .subtitle { font-size: 1.05rem; color: rgba(255,255,255,0.6); text-align: center; margin-bottom: 2rem; max-width: 600px; margin-left: auto; margin-right: auto; font-weight: 400; }
+    .search-container { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 24px; padding: 2.5rem; margin-bottom: 2rem; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1); }
+    .info-card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-radius: 20px; padding: 1.8rem; margin-bottom: 1.2rem; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(255, 255, 255, 0.05); transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+    .info-card:hover { transform: translateY(-4px) scale(1.01); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 30px rgba(0, 245, 212, 0.1); border-color: rgba(0, 245, 212, 0.2); }
+    .info-card h3 { margin-top: 0; margin-bottom: 1.2rem; color: #fff; font-size: 1.15rem; font-weight: 700; font-family: 'Space Grotesk', sans-serif; border-bottom: 2px solid; border-image: linear-gradient(90deg, #00f5d4, #9b5de5) 1; padding-bottom: 0.7rem; display: flex; align-items: center; gap: 0.5rem; }
+    .info-row { display: flex; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+    .info-row:last-child { border-bottom: none; }
+    .info-label { color: rgba(255,255,255,0.5); font-weight: 500; font-size: 0.9rem; }
+    .info-value { color: #fff; font-weight: 600; text-align: right; font-size: 0.95rem; }
+    .badge { display: inline-block; padding: 5px 14px; border-radius: 50px; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; }
+    .badge-active { background: rgba(0, 245, 212, 0.15); color: #00f5d4; border: 1px solid rgba(0, 245, 212, 0.3); box-shadow: 0 0 15px rgba(0, 245, 212, 0.2); }
+    .badge-inactive { background: rgba(255, 71, 87, 0.15); color: #ff4757; border: 1px solid rgba(255, 71, 87, 0.3); box-shadow: 0 0 15px rgba(255, 71, 87, 0.2); }
+    .badge-pending { background: rgba(255, 193, 7, 0.15); color: #ffc107; border: 1px solid rgba(255, 193, 7, 0.3); box-shadow: 0 0 15px rgba(255, 193, 7, 0.2); }
+    .risk-green { color: #00f5d4; font-weight: 700; } .risk-orange { color: #ffc107; font-weight: 700; } .risk-red { color: #ff4757; font-weight: 700; }
+    .stats-bar { display: flex; justify-content: center; gap: 2.5rem; margin: 2rem 0; flex-wrap: wrap; }
+    .stat-item { display: flex; align-items: center; gap: 0.6rem; color: rgba(255,255,255,0.6); font-size: 0.9rem; font-weight: 500; background: rgba(255,255,255,0.05); padding: 0.6rem 1.2rem; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); }
+    .stat-icon { font-size: 1.1rem; }
+    .footer { text-align: center; color: rgba(255,255,255,0.35); font-size: 0.85rem; margin-top: 3rem; padding-top: 2rem; border-top: 1px solid rgba(255,255,255,0.08); }
+    div[data-baseweb="input"] > div { background: rgba(255,255,255,0.05) !important; border: 1px solid rgba(255,255,255,0.1) !important; border-radius: 14px !important; color: white !important; }
+    div[data-baseweb="input"] > div:focus-within { border-color: #00f5d4 !important; box-shadow: 0 0 20px rgba(0, 245, 212, 0.15) !important; }
+    .stButton > button { border-radius: 14px !important; font-weight: 600 !important; letter-spacing: 0.5px !important; transition: all 0.3s ease !important; border: none !important; }
+    .stButton > button:hover { transform: translateY(-2px) !important; box-shadow: 0 8px 25px rgba(0, 245, 212, 0.3) !important; }
+    .stButton > button[kind="primary"] { background: linear-gradient(135deg, #00f5d4 0%, #00bbf9 100%) !important; color: #0f0c29 !important; }
+    .stButton > button[kind="secondary"] { background: rgba(255,255,255,0.08) !important; color: white !important; border: 1px solid rgba(255,255,255,0.15) !important; }
+    button[data-baseweb="tab"] { color: rgba(255,255,255,0.5) !important; font-weight: 600 !important; }
+    button[data-baseweb="tab"][aria-selected="true"] { color: #00f5d4 !important; }
+    section[data-testid="stSidebar"] { background: rgba(15, 12, 41, 0.95) !important; backdrop-filter: blur(20px) !important; border-right: 1px solid rgba(255,255,255,0.08) !important; }
+    details { background: rgba(255,255,255,0.03) !important; border: 1px solid rgba(255,255,255,0.08) !important; border-radius: 16px !important; }
+    div[data-testid="stMetric"] { background: rgba(255,255,255,0.03) !important; border-radius: 16px !important; padding: 1rem !important; border: 1px solid rgba(255,255,255,0.08) !important; }
+    div[data-testid="stMetric"] label { color: rgba(255,255,255,0.5) !important; }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] { color: #00f5d4 !important; font-weight: 700 !important; }
+    .stDownloadButton button { border-radius: 12px !important; background: linear-gradient(135deg, #9b5de5 0%, #f15bb5 100%) !important; color: white !important; border: none !important; font-weight: 600 !important; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: rgba(255,255,255,0.02); }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
 </style>
 """, unsafe_allow_html=True)
-
 
 
 # --- CONFIGURATION ---
@@ -503,79 +210,64 @@ def parse_carrier_data(mc_number, status_code, raw_data):
         }
 
     # ═══════════════════════════════════════════════════════
-    # FIXED: ROBUST MULTI-TIER OPERATING STATUS DETECTION
+    # FIXED: ROBUST OPERATING STATUS DETECTION
     # ═══════════════════════════════════════════════════════
-
-    # 1. Try explicit status fields first (most reliable)
     status_raw = str(find_val_by_keys(c, [
-        "status", "operating_status", "carrier_status", "authority_status", 
+        "status", "operating_status", "carrier_status", "authority_status",
         "common_authority_status", "contract_authority_status", "commonStatus", "contractStatus",
         "operatingAuthorityStatus", "carrierOperatingStatus"
     ]) or "").upper().strip()
 
-    is_active = None  # None = unknown, will decide later
+    is_active = None
 
     if status_raw:
-        # EXPLICIT INACTIVE signals (highest priority)
-        inactive_exact = ["INACTIVE", "REVOKED", "SUSPENDED", "CANCELED", "CANCELLED", 
-                          "DENIED", "NOT AUTHORIZED", "OUT OF SERVICE", "NO AUTHORITY", 
+        inactive_exact = ["INACTIVE", "REVOKED", "SUSPENDED", "CANCELED", "CANCELLED",
+                          "DENIED", "NOT AUTHORIZED", "OUT OF SERVICE", "NO AUTHORITY",
                           "NOT ACTIVE", "UNAUTHORIZED"]
         if any(kw == status_raw or kw in status_raw for kw in inactive_exact):
             is_active = False
-        # EXPLICIT ACTIVE signals
-        elif any(kw in status_raw for kw in ["ACTIVE", "AUTHORIZED", "OPERATING", "AUTH"]):
+        elif any(kw in status_raw for kw in ["ACTIVE", "AUTHORIZED", "OPERATING"]):
             is_active = True
         else:
-            is_active = False  # Unknown status = conservative (inactive)
+            is_active = False
 
-    # 2. Fallback: check allowed_to_operate boolean flags
     if is_active is None:
         allowed_val = find_val_by_keys(c, [
-            "allowed_to_operate", "allowedToOperate", "is_active", 
-            "common_allowed_to_operate", "contract_allowed_to_operate",
-            "allowed", "authorized"
+            "allowed_to_operate", "allowedToOperate", "is_active",
+            "common_allowed_to_operate", "contract_allowed_to_operate"
         ])
         if allowed_val is True or str(allowed_val).upper() in ["Y", "YES", "TRUE", "1", "ACTIVE"]:
             is_active = True
-        elif allowed_val is False or str(allowed_val).upper() in ["N", "NO", "FALSE", "0", "INACTIVE", "REVOKED"]:
+        elif allowed_val is False or str(allowed_val).upper() in ["N", "NO", "FALSE", "0", "INACTIVE"]:
             is_active = False
 
-    # 3. Last resort: scan full payload but be VERY conservative
     if is_active is None:
         payload_text = json.dumps(c).upper()
-
-        # If ANY strong inactive signal found anywhere → INACTIVE
-        inactive_signals = ["NOT AUTHORIZED", "AUTHORITY REVOKED", "SUSPENDED", 
+        inactive_signals = ["NOT AUTHORIZED", "AUTHORITY REVOKED", "SUSPENDED",
                            "INACTIVE", "OUT OF SERVICE", "CANCELED", "NOT ACTIVE",
                            "UNAUTHORIZED", "AUTHORITY DENIED"]
         if any(term in payload_text for term in inactive_signals):
             is_active = False
-        # Only mark active if we see EXPLICIT active authority phrases
-        elif any(term in payload_text for term in ["ACTIVE AUTHORITY", "AUTHORIZED TO OPERATE", 
-                                                     "OPERATING AUTHORITY ACTIVE", "COMMON AUTHORITY ACTIVE",
-                                                     "CONTRACT AUTHORITY ACTIVE"]):
+        elif any(term in payload_text for term in ["ACTIVE AUTHORITY", "AUTHORIZED TO OPERATE"]):
             is_active = True
         else:
-            is_active = False  # Unknown = safe default (inactive)
+            is_active = False
 
     status_str = "🟢 ACTIVE" if is_active else "🔴 INACTIVE"
 
     # ═══════════════════════════════════════════════════════
-    # FIXED: ACCURATE BROKER VS CARRIER DETECTION
+    # FIXED: BROKER VS CARRIER DETECTION
     # ═══════════════════════════════════════════════════════
-
     entity_val = str(find_val_by_keys(c, [
-        "entity_type", "entitytype", "operating_type", "operatingtype", 
-        "carrier_type", "type", "authority_type", "business_type"
+        "entity_type", "entitytype", "operating_type", "operatingtype",
+        "carrier_type", "type", "authority_type"
     ]) or "").upper()
 
-    broker_auth = find_val_by_keys(c, ["broker_authority_status", "brokerAuthStatus", 
-                                        "broker_authority", "brokerAuthority", "broker_status"])
+    broker_auth = find_val_by_keys(c, ["broker_authority_status", "brokerAuthStatus",
+                                        "broker_authority", "brokerAuthority"])
     is_broker_auth = str(broker_auth).upper() in ["Y", "ACTIVE", "AUTHORIZED", "TRUE", "A", "YES"]
 
-    # FIXED: Do NOT scan entire payload text for "BROKER" — too many false positives
-    # Only check entity field, broker authority flag, and explicit name matches
-    known_broker_names = ["BROKER", "BROKERAGE", "3PL", "GLOBAL LOGISTICS", "ECHO GLOBAL", 
+    known_broker_names = ["BROKER", "BROKERAGE", "3PL", "GLOBAL LOGISTICS", "ECHO GLOBAL",
                           "CH ROBINSON", "TQL", "RXO", "COYOTE", "UBER FREIGHT"]
 
     is_broker = (
@@ -599,17 +291,17 @@ def parse_carrier_data(mc_number, status_code, raw_data):
 
     all_payload_text = " ".join(flatten_dict_values(c)).upper()
 
-    phone = str(find_val_by_keys(c, ["phone", "cell_phone", "telephone", "phone_number", "contact_phone"]) or "N/A").strip()
+    phone = str(find_val_by_keys(c, ["phone", "cell_phone", "telephone", "phone_number"]) or "N/A").strip()
     if phone.lower() in ["none", "null", "", "not listed"]: phone = "N/A"
 
-    email = str(find_val_by_keys(c, ["email_address", "email", "emailaddress", "contact_email"]) or "").strip()
+    email = str(find_val_by_keys(c, ["email_address", "email", "emailaddress"]) or "").strip()
     if not email or email.lower() in ["none", "null", "not listed", "", "n/a"]:
         emails_found = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', all_payload_text)
-        valid_emails = [e for e in emails_found if not any(x in e.lower() for x in ["carrierchk", "example.com", "test.com", "email.com"])]
+        valid_emails = [e for e in emails_found if not any(x in e.lower() for x in ["carrierchk", "example.com"])]
         email = valid_emails[0] if valid_emails else "Not Listed"
 
-    city = str(find_val_by_keys(c, ["phy_city", "city", "physical_city", "mailing_city"]) or "").strip()
-    state = str(find_val_by_keys(c, ["phy_state", "state", "physical_state", "mailing_state"]) or "").strip()
+    city = str(find_val_by_keys(c, ["phy_city", "city", "physical_city"]) or "").strip()
+    state = str(find_val_by_keys(c, ["phy_state", "state", "physical_state"]) or "").strip()
     location = f"{city}, {state}".strip(", ") if city or state else "N/A"
 
     return {
@@ -622,7 +314,6 @@ def parse_carrier_data(mc_number, status_code, raw_data):
         "Location": location,
         "Raw Payload": raw_data
     }
-
 # --- STATE INIT ---
 for key, val in [("authenticated", False), ("current_user", None), ("session_token", None), 
                  ("is_admin", False), ("login_time", None), ("running", False), 
@@ -793,43 +484,41 @@ if not show_admin:
         else: st.error("Enter MC Number first.")
 
     if b2.button("🛑 STOP Engine", use_container_width=True):
-    lottie_container.empty()  # Clear truck animation
+        lottie_container.empty()
         st.session_state.running = False
         st.success("Stopped harvesting engine.")
 
     if b3.button("🗑️ Clear Data", use_container_width=True):
-    lottie_container.empty()  # Clear truck animation
+        lottie_container.empty()
         st.session_state.scraped_rows = []
         st.rerun()
 
     status_box = st.empty()
 
-# ─── TRUCK ANIMATION ─────────────────────────────────────────────────────
-# 🚛 Replace this URL with your own Lottie animation:
-#    1. Go to https://lottiefiles.com/free-animation/logistics-trucks-DHvuLcYVdQ
-#    2. Click "Use this animation in HTML" 
-#    3. Copy the Lottie JSON URL and paste it below
-TRUCK_LOTTIE_URL = "https://lottie.host/4b880071-0e7a-4e93-94a6-0311479e1f2a/2i2l1l2l2l.json"  # ← REPLACE THIS
-
-lottie_container = st.empty()
-
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 🚛 LOTTIE TRUCK ANIMATION
+    # Replace URL below with your own from https://lottiefiles.com
+    # ═══════════════════════════════════════════════════════════════════════════
+    TRUCK_LOTTIE_URL = "https://lottie.host/https://lottiefiles.com/free-animation/logistics-trucks-DHvuLcYVdQ.json"
+    lottie_container = st.empty()
 
     if st.session_state.running and st.session_state.current_mc != "":
-    # Show truck animation
-    with lottie_container.container():
-        cols = st.columns([1, 2, 1])
-        with cols[1]:
-            st_lottie(
-                TRUCK_LOTTIE_URL,
-                speed=1.5,
-                reverse=False,
-                loop=True,
-                quality="high",
-                height=200,
-                key="truck_running"
-            )
-            st.markdown("<p style='text-align:center;color:#00f5d4;font-weight:600;'>🚛 Engine Running...</p>", unsafe_allow_html=True)
-
+        
+        # Show truck animation
+        with lottie_container.container():
+            cols = st.columns([1, 2, 1])
+            with cols[1]:
+                st_lottie(
+                    TRUCK_LOTTIE_URL,
+                    speed=1.5,
+                    reverse=False,
+                    loop=True,
+                    quality="high",
+                    height=200,
+                    key="truck_running"
+                )
+                st.markdown("<p style='text-align:center;color:#00f5d4;font-weight:600;font-size:1.1rem;'>🚛 Engine Running...</p>", unsafe_allow_html=True)
+        
         current_mc_val = int(st.session_state.current_mc)
         
         status_box.info(f"🔄 **Live Progress:** Processing **MC-{current_mc_val}**...")
