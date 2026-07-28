@@ -499,10 +499,12 @@ if not show_admin:
     # 🚛 LOTTIE TRUCK ANIMATION
     # Replace URL below with your own from https://lottiefiles.com
     # ═══════════════════════════════════════════════════════════════════════════
-    TRUCK_LOTTIE_URL = "https://assets7.lottiefiles.com/packages/lf20_7fCbvNSmFD.json"
+    TRUCK_LOTTIE_URL = "https://assets9.lottiefiles.com/packages/lf20_u4yrau.json"
     lottie_container = st.empty()
 
     if st.session_state.running and st.session_state.current_mc != "":
+        
+        current_mc_val = int(st.session_state.current_mc)
         
         # Show truck animation
         # Show truck animation (with fallback)
