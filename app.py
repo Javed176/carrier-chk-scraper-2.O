@@ -1,6 +1,5 @@
 import os, time, uuid, json, re, requests, pandas as pd
 import streamlit as st
-from streamlit_lottie import st_lottie
 import streamlit.components.v1 as components
 from supabase import create_client, Client
 
@@ -18,7 +17,7 @@ st.markdown("""
     .subtitle { font-size: 1.05rem; color: rgba(255,255,255,0.6); text-align: center; margin-bottom: 2rem; max-width: 600px; margin-left: auto; margin-right: auto; font-weight: 400; }
     .search-container { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 24px; padding: 2.5rem; margin-bottom: 2rem; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1); }
     .info-card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-radius: 20px; padding: 1.8rem; margin-bottom: 1.2rem; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(255, 255, 255, 0.05); transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
-    .info-card:hover { transform: translateY(-4px) scale(1.01); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 30px rgba(0, 245, 212, 0.1); border-color: rgba(0, 245, 212, 0.2); }
+    .info-card:hover { transform: translateY(-4px) scaleX(1.01); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 30px rgba(0, 245, 212, 0.1); border-color: rgba(0, 245, 212, 0.2); }
     .info-card h3 { margin-top: 0; margin-bottom: 1.2rem; color: #fff; font-size: 1.15rem; font-weight: 700; font-family: 'Space Grotesk', sans-serif; border-bottom: 2px solid; border-image: linear-gradient(90deg, #00f5d4, #9b5de5) 1; padding-bottom: 0.7rem; display: flex; align-items: center; gap: 0.5rem; }
     .info-row { display: flex; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
     .info-row:last-child { border-bottom: none; }
@@ -314,6 +313,7 @@ def parse_carrier_data(mc_number, status_code, raw_data):
         "Location": location,
         "Raw Payload": raw_data
     }
+
 # --- STATE INIT ---
 for key, val in [("authenticated", False), ("current_user", None), ("session_token", None), 
                  ("is_admin", False), ("login_time", None), ("running", False), 
@@ -484,54 +484,35 @@ if not show_admin:
         else: st.error("Enter MC Number first.")
 
     if b2.button("🛑 STOP Engine", use_container_width=True):
-        lottie_container.empty()
         st.session_state.running = False
         st.success("Stopped harvesting engine.")
 
     if b3.button("🗑️ Clear Data", use_container_width=True):
-        lottie_container.empty()
         st.session_state.scraped_rows = []
         st.rerun()
 
     status_box = st.empty()
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 🚛 LOTTIE TRUCK ANIMATION
-    # Replace URL below with your own from https://lottiefiles.com
-    # ═══════════════════════════════════════════════════════════════════════════
-    TRUCK_LOTTIE_URL = "https://assets9.lottiefiles.com/packages/lf20_u4yrau.json"
-    lottie_container = st.empty()
-
     if st.session_state.running and st.session_state.current_mc != "":
-        
         current_mc_val = int(st.session_state.current_mc)
         
-        # Show truck animation
-        # Show truck animation (with fallback)
-        try:
-            with lottie_container.container():
-                cols = st.columns([1, 2, 1])
-                with cols[1]:
-                    st_lottie(
-                        TRUCK_LOTTIE_URL,
-                        speed=1.5,
-                        reverse=False,
-                        loop=True,
-                        quality="high",
-                        height=200,
-                        key="truck_running"
-                    )
-                    st.markdown("<p style='text-align:center;color:#00f5d4;font-weight:600;font-size:1.1rem;'>🚛 Engine Running...</p>", unsafe_allow_html=True)
-        except Exception:
-            lottie_container.markdown("""
-            <div style="text-align:center;padding:2rem;">
-                <div style="font-size:4rem;animation:bounce 1s infinite;">🚛</div>
-                <p style="color:#00f5d4;font-weight:600;font-size:1.1rem;margin-top:1rem;">Engine Running...</p>
+        # ═══════════════════════════════════════════════════════
+        # 🏃 RUNNING PERSON ANIMATION (Pure CSS - No External Dependencies)
+        # ═══════════════════════════════════════════════════════
+        anim_cols = st.columns([1, 2, 1])
+        with anim_cols[1]:
+            st.markdown("""
+            <div style="text-align:center;padding:1.5rem 0;background:transparent;">
+                <div class="runner" style="font-size:5rem;display:inline-block;">🏃</div>
+                <p style="color:#00f5d4;font-weight:700;font-size:1.2rem;margin-top:0.5rem;text-shadow:0 0 20px rgba(0,245,212,0.4);">Engine Running...</p>
             </div>
             <style>
-                @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-15px)} }
+                .runner { animation: run-bounce 0.5s ease-in-out infinite, run-slide 1.5s linear infinite; filter: drop-shadow(0 0 15px rgba(0,245,212,0.5)); }
+                @keyframes run-bounce { 0%,100% { transform: translateY(0) scaleX(1); } 25% { transform: translateY(-15px) scaleX(1.1); } 50% { transform: translateY(0) scaleX(1); } 75% { transform: translateY(-10px) scaleX(0.95); } }
+                @keyframes run-slide { 0% { transform: translateX(-40px); } 50% { transform: translateX(40px); } 100% { transform: translateX(-40px); } }
             </style>
             """, unsafe_allow_html=True)
+        
         status_box.info(f"🔄 **Live Progress:** Processing **MC-{current_mc_val}**...")
 
         status_code, raw_info = get_carrier_info(current_mc_val, CARRIER_TOKEN)
