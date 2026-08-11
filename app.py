@@ -1,673 +1,904 @@
-import streamlit as st
-import requests
+"""
+app.py — CarrierChk Pro (FMCSA MC Scraper)
+Merged: Original UI + Direct API Integration + Fixed Status Parser
+"""
+
+import io
+import os
+import sys
 import time
 import json
-import csv
-import io
-import re
 import uuid
+from typing import List
+import requests
 import pandas as pd
-from datetime import datetime, timedelta
-from supabase import create_client, Client
+import streamlit as st
+from datetime import datetime
 
-# ─── PAGE CONFIG ───
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# ── Try importing local modules; fall back to built-ins ──────────────────────
+try:
+    from db_manager import db
+except ImportError:
+    class DummyDB:
+        def authenticate_and_login(self, u, p):
+            return True, "OK", {"username": u, "is_admin": True, "session_duration_hours": 3.0, "session_token": "dummy", "delay_ms": 500}
+        def verify_active_session(self, u, s): return True
+        def log_activity(self, u, a, d=""): pass
+        def get_activity_logs(self, limit=200): return pd.DataFrame()
+        def get_all_users(self): return []
+        def create_user(self, *a, **k): return False, "db_manager.py missing."
+        def update_user_config(self, *a, **k): return False, "db_manager.py missing."
+    db = DummyDB()
+
+try:
+    from scraper import scrape_mc
+except ImportError:
+    # Built-in scraper using carrierchk API
+    CARRIER_TOKEN = os.environ.get("CARRIER_TOKEN", "")
+    CARRIER_API_URL = os.environ.get("CARRIER_API_URL", "https://carrierchk.com/api/carrier")
+
+    http_session = requests.Session()
+
+    def _find_val(d, keys):
+        if not isinstance(d, dict):
+            return None
+        for k in keys:
+            if k in d:
+                return d[k]
+        for v in d.values():
+            if isinstance(v, dict):
+                found = _find_val(v, keys)
+                if found is not None:
+                    return found
+        return None
+
+    def _normalize_status(data):
+        """
+        ROBUST STATUS DETECTION.
+        Returns: "ACTIVE", "INACTIVE", or "NOT AUTHORIZED"
+        """
+        # 1. Check explicit operating_status field
+        status_raw = _find_val(data, [
+            "operating_status", "status", "authority_status", "carrier_status",
+            "operation_status", "active_status", "current_status", "record_status"
+        ]) or ""
+        s = str(status_raw).upper().strip()
+
+        # Exact matches for active
+        if s in ["ACTIVE", "AUTHORIZED", "AUTHORISED", "OPERATING", "OPERATIONAL", "A", "Y", "YES", "TRUE", "1"]:
+            return "ACTIVE"
+        # Exact matches for inactive
+        if s in ["INACTIVE", "NOT AUTHORIZED", "NOT AUTHORISED", "REVOKED", "SUSPENDED", "NONE", "PENDING REVOCATION", "I", "N", "NO", "FALSE", "0"]:
+            return "INACTIVE"
+
+        # 2. Check individual authority statuses
+        common = str(_find_val(data, ["common_authority_status", "commonAuthStatus", "common_status"]) or "").upper().strip()
+        contract = str(_find_val(data, ["contract_authority_status", "contractAuthStatus", "contract_status"]) or "").upper().strip()
+        broker = str(_find_val(data, ["broker_authority_status", "brokerAuthStatus", "broker_status"]) or "").upper().strip()
+
+        common_active = common in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
+        contract_active = contract in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
+        broker_active = broker in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
+
+        common_inactive = common in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"]
+        contract_inactive = contract in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"]
+        broker_inactive = broker in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"]
+
+        # If ANY authority is active → ACTIVE
+        if common_active or contract_active or broker_active:
+            return "ACTIVE"
+        # If ALL present authorities are inactive → INACTIVE
+        if common_inactive or contract_inactive or broker_inactive:
+            return "INACTIVE"
+
+        # 3. Check operation status code
+        op = str(_find_val(data, ["carrier_operation_status", "operation_status_code", "status_code"]) or "").upper().strip()
+        if op == "A":
+            return "ACTIVE"
+        if op in ["I", "N"]:
+            return "INACTIVE"
+
+        # 4. Conservative fallback
+        return "INACTIVE"
+
+    def _is_broker(data):
+        """
+        Detect if entity is a broker.
+        """
+        entity = str(_find_val(data, ["entity_type", "carrier_type", "operation_type", "company_type"]) or "").upper().strip()
+        if entity in ["BROKER", "FREIGHT FORWARDER"]:
+            return True
+        if "BROKER" in entity and "CARRIER" not in entity:
+            return True
+
+        broker_auth = str(_find_val(data, ["broker_authority_status", "brokerAuthStatus", "broker_status"]) or "").upper().strip()
+        common_auth = str(_find_val(data, ["common_authority_status", "commonAuthStatus", "common_status"]) or "").upper().strip()
+        contract_auth = str(_find_val(data, ["contract_authority_status", "contractAuthStatus", "contract_status"]) or "").upper().strip()
+
+        broker_active = broker_auth in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
+        common_active = common_auth in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
+        contract_active = contract_auth in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
+
+        # Broker auth active but no carrier auth → broker
+        if broker_active and not common_active and not contract_active:
+            return True
+
+        return False
+
+    def scrape_mc(mc):
+        """Built-in scraper using carrierchk API."""
+        token = st.secrets.get("CARRIER_TOKEN", CARRIER_TOKEN)
+        api_url = st.secrets.get("CARRIER_API_URL", CARRIER_API_URL)
+
+        if not token or not api_url:
+            return {
+                "MC Number": f"MC-{mc:07d}",
+                "Carrier Name": "Error: No API token configured",
+                "Entity Type": "CARRIER",
+                "Operating Status": "NOT FOUND",
+                "Phone Number": "—",
+                "Email Address": "—",
+                "Location": "—",
+                "_found": False
+            }
+
+        params = {"type": "mc", "value": str(int(mc)).strip(), "token": token}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Referer": "https://carrierchk.com/"
+        }
+
+        try:
+            r = http_session.get(api_url, params=params, headers=headers, timeout=15)
+            if r.status_code == 200:
+                c = r.json()
+                data = c.get("carrier") or c.get("data") or c
+
+                name = _find_val(data, ["legal_name", "name", "company_name", "carrier_name", "dba_name"]) or "Unknown"
+                dot = _find_val(data, ["usdot_number", "dot_number", "usdot"]) or "N/A"
+                phone = _find_val(data, ["phone", "business_phone", "contact_phone"]) or "—"
+                email = _find_val(data, ["email", "business_email", "contact_email"]) or "—"
+                city = str(_find_val(data, ["city", "physical_city"]) or "").strip()
+                state = str(_find_val(data, ["state", "physical_state", "state_code"]) or "").strip()
+                location = f"{city}, {state}".strip(", ") or "—"
+
+                is_broker = _is_broker(data)
+                status = _normalize_status(data)
+
+                if is_broker:
+                    return {
+                        "MC Number": f"BROKER MC-{mc:07d}",
+                        "Broker Name": name,
+                        "Carrier Name": name,
+                        "Entity Type": "BROKER",
+                        "Operating Status": status,
+                        "Phone Number": phone,
+                        "Email Address": email,
+                        "Location": location,
+                        "USDOT": dot,
+                        "_found": True
+                    }
+                else:
+                    return {
+                        "MC Number": f"MC-{mc:07d}",
+                        "Carrier Name": name,
+                        "Broker Name": "",
+                        "Entity Type": "CARRIER",
+                        "Operating Status": status,
+                        "Phone Number": phone,
+                        "Email Address": email,
+                        "Location": location,
+                        "USDOT": dot,
+                        "_found": True
+                    }
+            elif r.status_code == 429:
+                time.sleep(2)
+                r2 = http_session.get(api_url, params=params, headers=headers, timeout=15)
+                if r2.status_code == 200:
+                    return scrape_mc(mc)  # retry returns fresh result
+                return {
+                    "MC Number": f"MC-{mc:07d}",
+                    "Carrier Name": f"Rate Limited (429)",
+                    "Entity Type": "CARRIER",
+                    "Operating Status": "NOT FOUND",
+                    "Phone Number": "—",
+                    "Email Address": "—",
+                    "Location": "—",
+                    "_found": False
+                }
+            else:
+                return {
+                    "MC Number": f"MC-{mc:07d}",
+                    "Carrier Name": f"HTTP {r.status_code}",
+                    "Entity Type": "CARRIER",
+                    "Operating Status": "NOT FOUND",
+                    "Phone Number": "—",
+                    "Email Address": "—",
+                    "Location": "—",
+                    "_found": False
+                }
+        except Exception as e:
+            return {
+                "MC Number": f"MC-{mc:07d}",
+                "Carrier Name": f"Error: {str(e)[:40]}",
+                "Entity Type": "CARRIER",
+                "Operating Status": "NOT FOUND",
+                "Phone Number": "—",
+                "Email Address": "—",
+                "Location": "—",
+                "_found": False
+            }
+
+
+# ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="CarrierChk Pro",
     page_icon="🚛",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded",
 )
 
-# ─── SECRETS ───
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
-CARRIER_TOKEN = st.secrets.get("CARRIER_TOKEN", "")
-CARRIER_API_URL = st.secrets.get("CARRIER_API_URL", "https://carrierchk.com/api/carrier")
+# ── Session State Initialization ──────────────────────────────────────────────
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "scraping" not in st.session_state:
+    st.session_state.scraping = False
+if "stop_requested" not in st.session_state:
+    st.session_state.stop_requested = False
+if "current_mc" not in st.session_state:
+    st.session_state.current_mc = 1800000
+if "start_mc_val" not in st.session_state:
+    st.session_state.start_mc_val = 1800000
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+if "user_info" not in st.session_state:
+    st.session_state.user_info = None
+if "login_time" not in st.session_state:
+    st.session_state.login_time = 0.0
 
-# ─── SUPABASE CLIENT ───
-supabase = None
-if SUPABASE_URL and SUPABASE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception:
-        supabase = None
 
-# ─── SESSION STATE ───
-for key in ["authenticated", "current_user", "is_admin", "session_token",
-            "last_session_check", "harvesting", "current_mc", "harvested",
-            "harvest_log", "page"]:
-    if key not in st.session_state:
-        if key in ["authenticated", "is_admin", "harvesting"]:
-            st.session_state[key] = False
-        elif key in ["current_user", "session_token", "page"]:
-            st.session_state[key] = ""
-        elif key == "current_mc":
-            st.session_state[key] = 1800000
-        elif key in ["harvested", "harvest_log"]:
-            st.session_state[key] = []
-        else:
-            st.session_state[key] = time.time()
-
-# ─── CUSTOM CSS ───
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.stApp {
-    background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
-    color: #e2e8f0;
-}
-.glass-card {
-    background: rgba(255, 255, 255, 0.05);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 16px;
-    padding: 24px;
-    margin-bottom: 16px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.glass-card:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
-    border-color: rgba(255, 255, 255, 0.15);
-}
-.app-title {
-    font-size: 2.8rem;
-    font-weight: 800;
-    background: linear-gradient(90deg, #00d4ff, #7b2cbf, #ff006e);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    text-shadow: 0 0 40px rgba(0, 212, 255, 0.3);
-    letter-spacing: -1px;
-    margin-bottom: 4px;
-}
-.badge-active {
-    display: inline-block;
-    padding: 6px 16px;
-    border-radius: 20px;
-    background: rgba(0, 255, 136, 0.1);
-    border: 1px solid rgba(0, 255, 136, 0.4);
-    color: #00ff88;
-    font-weight: 700;
-    font-size: 0.85rem;
-    box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
-}
-.badge-inactive {
-    display: inline-block;
-    padding: 6px 16px;
-    border-radius: 20px;
-    background: rgba(255, 71, 87, 0.1);
-    border: 1px solid rgba(255, 71, 87, 0.4);
-    color: #ff4757;
-    font-weight: 700;
-    font-size: 0.85rem;
-    box-shadow: 0 0 12px rgba(255, 71, 87, 0.2);
-}
-.badge-broker {
-    display: inline-block;
-    padding: 6px 16px;
-    border-radius: 20px;
-    background: rgba(255, 165, 2, 0.1);
-    border: 1px solid rgba(255, 165, 2, 0.4);
-    color: #ffa502;
-    font-weight: 700;
-    font-size: 0.85rem;
-    box-shadow: 0 0 12px rgba(255, 165, 2, 0.2);
-}
-.stButton>button {
-    background: linear-gradient(135deg, #00d4ff, #7b2cbf) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 12px !important;
-    padding: 12px 28px !important;
-    font-weight: 700 !important;
-    font-size: 1rem !important;
-    box-shadow: 0 4px 20px rgba(0, 212, 255, 0.3) !important;
-    transition: all 0.3s ease !important;
-}
-.stButton>button:hover {
-    transform: translateY(-2px) scale(1.02) !important;
-    box-shadow: 0 8px 30px rgba(0, 212, 255, 0.5) !important;
-}
-.stTextInput>div>div>input, .stNumberInput>div>div>input {
-    background: rgba(255, 255, 255, 0.05) !important;
-    border: 1px solid rgba(255, 255, 255, 0.1) !important;
-    border-radius: 12px !important;
-    color: #e2e8f0 !important;
-    padding: 14px 18px !important;
-    font-size: 1rem !important;
-}
-.stTextInput>div>div>input:focus, .stNumberInput>div>div>input:focus {
-    border-color: #00d4ff !important;
-    box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.15) !important;
-}
-[data-testid="stSidebar"] {
-    background: rgba(15, 12, 41, 0.8) !important;
-    backdrop-filter: blur(20px) !important;
-    border-right: 1px solid rgba(255, 255, 255, 0.05) !important;
-}
-.stTabs [data-baseweb="tab-list"] {
-    background: rgba(255, 255, 255, 0.03) !important;
-    border-radius: 12px !important;
-    padding: 4px !important;
-    gap: 4px !important;
-}
-.stTabs [data-baseweb="tab"] {
-    color: #94a3b8 !important;
-    font-weight: 600 !important;
-    border-radius: 8px !important;
-    padding: 10px 20px !important;
-}
-.stTabs [aria-selected="true"] {
-    background: rgba(0, 212, 255, 0.15) !important;
-    color: #00d4ff !important;
-}
-::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
-.metric-card {
-    background: rgba(255, 255, 255, 0.04);
-    border-radius: 12px;
-    padding: 16px;
-    text-align: center;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-}
-.metric-value {
-    font-size: 1.8rem;
-    font-weight: 800;
-    color: #00d4ff;
-}
-.metric-label {
-    font-size: 0.8rem;
-    color: #94a3b8;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    margin-top: 4px;
-}
-@keyframes pulse-glow {
-    0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.2); }
-    50% { box-shadow: 0 0 40px rgba(0, 212, 255, 0.5); }
-}
-.harvest-active {
-    animation: pulse-glow 2s ease-in-out infinite;
-    border: 1px solid rgba(0, 212, 255, 0.4);
-    border-radius: 16px;
-    padding: 20px;
-    background: rgba(0, 212, 255, 0.05);
-}
-.stDownloadButton>button {
-    background: linear-gradient(135deg, #7b2cbf, #ff006e) !important;
-    box-shadow: 0 4px 20px rgba(123, 44, 191, 0.3) !important;
-}
-/* Running person animation */
-@keyframes run-slide {
-    0% { transform: translateX(0); }
-    50% { transform: translateX(30px); }
-    100% { transform: translateX(0); }
-}
-@keyframes run-bounce {
-    0%, 100% { transform: translateY(0); }
-    25% { transform: translateY(-8px); }
-    50% { transform: translateY(0); }
-    75% { transform: translateY(-4px); }
-}
-.runner-box {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 16px;
-    background: rgba(0, 212, 255, 0.05);
-    border-radius: 12px;
-    border: 1px solid rgba(0, 212, 255, 0.2);
-}
-.runner-emoji {
-    font-size: 2rem;
-    animation: run-slide 1.2s ease-in-out infinite, run-bounce 0.6s ease-in-out infinite;
-    filter: drop-shadow(0 0 8px rgba(0, 212, 255, 0.6));
-}
-.runner-text {
-    color: #00d4ff;
-    font-weight: 700;
-    font-size: 1.1rem;
-}
-</style>
-""", unsafe_allow_html=True)
-
-# ─── AUTH FUNCTIONS ───
-def verify_active_session():
-    if st.session_state.authenticated and st.session_state.current_user:
-        now = time.time()
-        if now - st.session_state.last_session_check < 30.0:
-            return True
-        st.session_state.last_session_check = now
-        try:
-            if supabase:
-                res = supabase.table("users").select("active_session_id").eq("email", st.session_state.current_user).execute()
-                if res.data and res.data[0].get("active_session_id") != st.session_state.session_token:
-                    return False
-        except Exception:
-            pass
-    return True
-
-def login_user(email, password):
-    if not supabase:
-        return False, "Database connection failed"
-    try:
-        res = supabase.table("users").select("*").eq("email", email).execute()
-        if not res.data:
-            return False, "Invalid credentials"
-        user = res.data[0]
-        if user.get("password") != password:
-            return False, "Invalid credentials"
-        new_token = str(uuid.uuid4())
-        supabase.table("users").update({
-            "active_session_id": new_token
-        }).eq("email", email).execute()
-        st.session_state.authenticated = True
-        st.session_state.current_user = email
-        st.session_state.is_admin = user.get("is_admin", False)
-        st.session_state.session_token = new_token
-        st.session_state.last_session_check = time.time()
-        return True, "Success"
-    except Exception as e:
-        return False, f"Login error: {e}"
-
-def logout_user():
-    if supabase and st.session_state.current_user:
-        try:
-            supabase.table("users").update({"active_session_id": None}).eq("email", st.session_state.current_user).execute()
-        except Exception:
-            pass
-    for key in ["authenticated", "current_user", "is_admin", "session_token", "harvesting"]:
-        st.session_state[key] = False if key != "session_token" else ""
+# ── Force Logout Helper ───────────────────────────────────────────────────────
+def force_logout(reason: str = "Logged out."):
+    if st.session_state.get("authenticated") and st.session_state.get("user_info"):
+        username = st.session_state.user_info.get("username", "unknown")
+        db.log_activity(username, "LOGOUT", f"Session terminated: {reason}")
+    st.session_state["authenticated"] = False
+    st.session_state["user_info"] = None
+    st.session_state["login_time"] = 0.0
+    st.session_state["logout_reason"] = reason
     st.rerun()
 
-# ─── API FUNCTIONS ───
-http_session = requests.Session()
 
-def get_carrier_info(query, token, api_url):
-    if not query or not token:
-        return None
-    q = str(query).strip()
-    search_type = "mc" if q.isdigit() and len(q) <= 8 else "dot" if q.isdigit() else "email"
-    params = {"type": search_type, "value": q, "token": token}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Referer": "https://carrierchk.com/"
-    }
-    try:
-        r = http_session.get(api_url, params=params, headers=headers, timeout=12.0)
-        if r.status_code == 200:
-            return r.json()
-        elif r.status_code == 429:
-            time.sleep(2)
-            r2 = http_session.get(api_url, params=params, headers=headers, timeout=12.0)
-            if r2.status_code == 200:
-                return r2.json()
-        return {"_error": f"HTTP {r.status_code}", "_status": r.status_code}
-    except requests.exceptions.Timeout:
-        return {"_error": "Request timed out", "_status": 0}
-    except Exception as e:
-        return {"_error": str(e), "_status": 0}
+# ── Login Screen ──────────────────────────────────────────────────────────────
+def _render_login_screen() -> bool:
+    if st.session_state.get("authenticated"):
+        return True
 
-def find_val_by_keys(d, keys):
-    if not isinstance(d, dict):
-        return None
-    for k in keys:
-        if k in d:
-            return d[k]
-    for v in d.values():
-        if isinstance(v, dict):
-            found = find_val_by_keys(v, keys)
-            if found is not None:
-                return found
-    return None
-
-def flatten_dict_values(d):
-    vals = []
-    if isinstance(d, dict):
-        for v in d.values():
-            if isinstance(v, dict):
-                vals.extend(flatten_dict_values(v))
-            elif isinstance(v, list):
-                for item in v:
-                    vals.extend(flatten_dict_values(item) if isinstance(item, dict) else [str(item)])
-            else:
-                vals.append(str(v))
-    return vals
-
-# ─── PARSE CARRIER DATA ───
-# ONLY CHANGE: Fixed keyword lists to use exact matching instead of substring
-def parse_carrier_data(c):
-    if not c or not isinstance(c, dict):
-        return None
-    if "_error" in c:
-        return None
-
-    data = c.get("carrier") or c.get("data") or c
-
-    # Basic info
-    name = find_val_by_keys(data, ["legal_name", "name", "company_name", "carrier_name", "dba_name", "doing_business_as"]) or "Unknown"
-    dot = find_val_by_keys(data, ["usdot_number", "dot_number", "usdot", "dot"]) or "N/A"
-    mc = find_val_by_keys(data, ["mc_number", "mc", "docket_number", "mc_docket"]) or "N/A"
-    phone = find_val_by_keys(data, ["phone", "business_phone", "contact_phone", "telephone"]) or "N/A"
-    email = find_val_by_keys(data, ["email", "business_email", "contact_email", "email_address"]) or "N/A"
-    city = find_val_by_keys(data, ["city", "physical_city", "business_city"]) or ""
-    state = find_val_by_keys(data, ["state", "physical_state", "business_state", "state_code"]) or ""
-    location = f"{city}, {state}".strip(", ") or "N/A"
-
-    # Entity type
-    entity_type = find_val_by_keys(data, ["entity_type", "carrier_type", "operation_type", "company_type", "business_type"]) or ""
-    entity_val = str(entity_type).upper().strip()
-
-    # Authority statuses
-    broker_auth = find_val_by_keys(data, ["broker_authority_status", "brokerAuthStatus", "broker_status", "brokerAuthority", "broker_auth"]) or ""
-    common_auth = find_val_by_keys(data, ["common_authority_status", "commonAuthStatus", "common_status", "commonAuthority"]) or ""
-    contract_auth = find_val_by_keys(data, ["contract_authority_status", "contractAuthStatus", "contract_status", "contractAuthority"]) or ""
-
-    broker_auth_str = str(broker_auth).upper().strip()
-    common_auth_str = str(common_auth).upper().strip()
-    contract_auth_str = str(contract_auth).upper().strip()
-
-    is_broker_auth = broker_auth_str in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
-    has_common_auth = common_auth_str in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
-    has_contract_auth = contract_auth_str in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
-
-    # BROKER DETECTION - Removed full JSON text scan "BROKER" in c_text
-    is_broker = (
-        is_broker_auth or
-        "BROKER" in entity_val or
-        any(b in name for b in ["BROKERAGE", "BROKER", "LOGISTICS", "DISPATCH", "TQL", "TOTAL QUALITY LOGISTICS", "CH ROBINSON", "LANDSTAR", "XPO", "SCHNEIDER", "KNIGHT", "HUB GROUP", "MODE TRANSPORTATION", "AMAZON", "UBER", "LYFT", "DAT", "TRUCKSTOP", "LOADBOARD", "FREIGHTOS", "CONVOY", "NEXT", "TRANFIX", "EKO"])
+    st.markdown(
+        """
+        <style>
+        .login-card {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(139,92,246,0.35);
+            border-radius: 20px;
+            padding: 44px 48px;
+            width: 100%;
+            max-width: 440px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+            text-align: center;
+            margin: 40px auto;
+        }
+        .login-icon  { font-size: 48px; margin-bottom: 8px; }
+        .login-title { font-size: 24px; font-weight: 700; color: #f0f0f0; margin-bottom: 4px; }
+        .login-sub   { font-size: 13px; color: #718096; margin-bottom: 24px; }
+        .login-error {
+            background: rgba(239,68,68,0.12);
+            border: 1px solid rgba(239,68,68,0.35);
+            border-radius: 8px;
+            color: #fc8181;
+            font-size: 13px;
+            padding: 10px 14px;
+            margin-top: 14px;
+        }
+        div[data-testid="stTextInput"] input {
+            background: rgba(255,255,255,0.07) !important;
+            border: 1px solid rgba(139,92,246,0.4) !important;
+            border-radius: 10px !important;
+            color: #f0f0f0 !important;
+            font-size: 15px !important;
+            padding: 12px 16px !important;
+        }
+        div[data-testid="stButton"] > button {
+            background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%) !important;
+            border: none !important; border-radius: 10px !important;
+            color: white !important; font-weight: 700 !important;
+            font-size: 15px !important; padding: 12px 0 !important;
+            width: 100% !important;
+            box-shadow: 0 4px 20px rgba(99,102,241,0.45) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    entity_label = "BROKER" if is_broker else "CARRIER"
+    _, center, _ = st.columns([1, 1.8, 1])
+    with center:
+        st.markdown(
+            '<div class="login-card">'
+            '<div class="login-icon">🔒</div>'
+            '<div class="login-title">CarrierChk Pro Access</div>'
+            '<div class="login-sub">Enter your credentials to sign in.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
-    # STATUS DETECTION - FIXED: Removed single-letter and partial keywords
-    status_raw = find_val_by_keys(data, [
-        "operating_status", "status", "authority_status", "carrier_status",
-        "operation_status", "active_status", "current_status", "record_status"
-    ]) or ""
-    status_str_raw = str(status_raw).upper().strip()
+        if st.session_state.get("logout_reason"):
+            st.warning(st.session_state["logout_reason"])
 
-    is_active = False
+        username = st.text_input("Username / Email", key="login_username", placeholder="Username")
+        password = st.text_input("Password", type="password", key="login_password", placeholder="Password")
+        login_btn = st.button("🔓 Sign In", key="login_btn")
 
-    # Phase 1: Exact match for explicit status values (NO single letters!)
-    if status_str_raw in ["ACTIVE", "AUTHORIZED", "AUTHORISED", "OPERATING", "OPERATIONAL"]:
-        is_active = True
-    elif status_str_raw in ["INACTIVE", "NOT AUTHORIZED", "NOT AUTHORISED", "REVOKED", "SUSPENDED", "NONE", "PENDING REVOCATION"]:
-        is_active = False
-    elif status_str_raw in ["A", "Y", "YES", "TRUE", "1"]:
-        is_active = True
-    elif status_str_raw in ["I", "N", "NO", "FALSE", "0"]:
-        is_active = False
+        if login_btn:
+            if not username or not password:
+                st.markdown(
+                    '<div class="login-error">⚠️ Please enter both username and password.</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                success, msg, uinfo = db.authenticate_and_login(username, password)
+                if success and uinfo:
+                    st.session_state["authenticated"] = True
+                    st.session_state["user_info"] = uinfo
+                    st.session_state["login_time"] = time.time()
+                    st.session_state["logout_reason"] = None
+                    st.rerun()
+                else:
+                    st.markdown(
+                        f'<div class="login-error">❌ {msg}</div>',
+                        unsafe_allow_html=True,
+                    )
+    return False
 
-    # Phase 2: Check authority statuses
-    if is_active is False:
-        if has_common_auth or has_contract_auth or is_broker_auth:
-            is_active = True
 
-    # Phase 3: Conservative payload scan (only multi-word phrases, no single letters)
-    c_text = str(c).upper()
-    if "INACTIVE" in c_text or "NOT AUTHORIZED" in c_text or "REVOKED" in c_text or "SUSPENDED" in c_text:
-        is_active = False
-    elif "ACTIVE" in c_text and "INACTIVE" not in c_text:
-        is_active = True
+if not _render_login_screen():
+    st.stop()
 
-    status_str = "ACTIVE" if is_active else "INACTIVE"
+# ── Session Lockout & Expiration Checks ───────────────────────────────────────
+user_info = st.session_state.get("user_info", {})
+username = user_info.get("username", "User")
+session_token = user_info.get("session_token", "")
+session_duration_h = float(user_info.get("session_duration_hours", 3.0))
 
-    # Insurance
-    bipd = find_val_by_keys(data, ["bipd_required", "bipd_amount", "bi_pd_amount"]) or "N/A"
-    cargo = find_val_by_keys(data, ["cargo_required", "cargo_amount", "cargo_coverage"]) or "N/A"
+if not db.verify_active_session(username, session_token):
+    force_logout("Session terminated: Account logged in from another tab or device.")
 
-    # Fleet
-    power = find_val_by_keys(data, ["power_units", "total_power_units", "fleet_size", "number_of_power_units"]) or "N/A"
-    drivers = find_val_by_keys(data, ["drivers", "total_drivers", "number_of_drivers", "driver_count"]) or "N/A"
+elapsed_sec = time.time() - st.session_state.get("login_time", time.time())
+max_sec = session_duration_h * 3600.0
+remaining_sec = max(0.0, max_sec - elapsed_sec)
 
-    # Safety
-    safety = find_val_by_keys(data, ["safety_rating", "safety_rating_date", "rating"]) or "Not Rated"
+if elapsed_sec >= max_sec:
+    db.log_activity(username, "SESSION_TIMEOUT", f"Auto-locked after {session_duration_h} hours")
+    force_logout(f"Session expired automatically after {session_duration_h:g} hours.")
 
-    # Age / Risk
-    age_months = None
-    auth_date = find_val_by_keys(data, ["authority_date", "authority_issue_date", "date_authorized", "active_since"])
-    if auth_date:
-        try:
-            dt = pd.to_datetime(auth_date)
-            age_months = (datetime.now() - dt).days / 30.44
-        except Exception:
-            pass
+# ── Global CSS Styling ────────────────────────────────────────────────────────
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
-    risk_flag = ""
-    if not is_active:
-        risk_flag = "INACTIVE AUTHORITY"
-    elif age_months is not None and age_months < 6:
-        risk_flag = "NEW CARRIER (< 6 MO)"
-    else:
-        risk_flag = "VERIFIED"
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
-    return {
-        "name": name,
-        "dot": dot,
-        "mc": mc,
-        "phone": phone,
-        "email": email,
-        "location": location,
-        "status": status_str,
-        "is_active": is_active,
-        "entity_type": entity_label,
-        "is_broker": is_broker,
-        "bipd": bipd,
-        "cargo": cargo,
-        "power_units": power,
-        "drivers": drivers,
-        "safety": safety,
-        "risk_flag": risk_flag,
-        "age_months": age_months,
-        "raw": data
+    .stApp {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        min-height: 100vh;
     }
 
-# ─── HARVEST ENGINE ───
-def run_harvest(start_mc, count, delay_ms, token, api_url):
-    results = []
-    current = int(start_mc)
-    for i in range(count):
-        if not st.session_state.harvesting:
-            break
-        res = get_carrier_info(str(current), token, api_url)
-        if res and "_error" not in res:
-            parsed = parse_carrier_data(res)
-            if parsed:
-                results.append(parsed)
-                st.session_state.harvested.append(parsed)
-                st.session_state.harvest_log.append(f"OK MC-{current}: {parsed['name']} [{parsed['status']}]")
-            else:
-                st.session_state.harvest_log.append(f"WARN MC-{current}: Parse failed")
-        else:
-            err = res.get("_error", "Unknown") if res else "No response"
-            st.session_state.harvest_log.append(f"ERR MC-{current}: {err}")
-        current += 1
-        if delay_ms > 0:
-            time.sleep(delay_ms / 1000.0)
-    st.session_state.harvesting = False
-    st.session_state.current_mc = current
-    return results
+    #MainMenu, footer { visibility: hidden; }
+    div[data-testid="stHeader"] { background: transparent !important; }
 
-# ─── LOGIN PAGE ───
-if not st.session_state.authenticated:
-    st.markdown("<div class='app-title'>🚛 CarrierChk Pro</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:#94a3b8; font-size:1.1rem; margin-bottom:40px;'>FMCSA Carrier Verification & Lead Harvesting Portal</p>", unsafe_allow_html=True)
+    .header-banner {
+        background: linear-gradient(90deg, rgba(99,102,241,0.15) 0%, rgba(139,92,246,0.10) 100%);
+        border: 1px solid rgba(139,92,246,0.3);
+        border-radius: 16px;
+        padding: 24px 32px;
+        margin-bottom: 24px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+    }
+    .header-title {
+        font-size: 28px;
+        font-weight: 700;
+        color: #f0f0f0;
+        margin: 0;
+    }
 
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        st.markdown("<h3 style='text-align:center; margin-bottom:24px;'>Secure Login</h3>", unsafe_allow_html=True)
-        email_in = st.text_input("Email", key="login_email", placeholder="your@email.com")
-        pass_in = st.text_input("Password", type="password", key="login_pass", placeholder="••••••••")
-        if st.button("Sign In", use_container_width=True):
-            if not supabase:
-                st.error("Cannot connect to database. Your Supabase project may be paused. Go to supabase.com and resume it.")
-            else:
-                ok, msg = login_user(email_in, pass_in)
-                if ok:
-                    st.success("Welcome back!")
-                    time.sleep(0.5)
+    .input-card {
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 14px;
+        padding: 24px 28px;
+        margin-bottom: 24px;
+    }
+
+    div[data-testid="stNumberInput"] input,
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stSelectbox"] > div {
+        background: rgba(255,255,255,0.06) !important;
+        border: 1px solid rgba(139,92,246,0.4) !important;
+        border-radius: 8px !important;
+        color: #f0f0f0 !important;
+        font-family: 'Inter', sans-serif !important;
+    }
+
+    div[data-testid="stNumberInput"] label,
+    div[data-testid="stTextInput"] label,
+    div[data-testid="stSelectbox"] label {
+        color: #c0c0d0 !important;
+        font-weight: 500 !important;
+        font-size: 13px !important;
+    }
+
+    div[data-testid="stButton"] > button[kind="primary"] {
+        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%) !important;
+        border: none !important;
+        border-radius: 10px !important;
+        color: white !important;
+        font-weight: 600 !important;
+        font-size: 15px !important;
+        padding: 12px 24px !important;
+        width: 100% !important;
+        box-shadow: 0 4px 20px rgba(99,102,241,0.4) !important;
+    }
+
+    div[data-testid="stButton"] > button[kind="secondary"] {
+        background: rgba(239,68,68,0.15) !important;
+        border: 1px solid rgba(239,68,68,0.4) !important;
+        border-radius: 10px !important;
+        color: #fc8181 !important;
+        font-weight: 600 !important;
+        font-size: 14px !important;
+        padding: 12px 20px !important;
+        width: 100% !important;
+    }
+
+    div[data-testid="stTabs"] [role="tablist"] {
+        background: rgba(255,255,255,0.04);
+        border-radius: 12px;
+        padding: 6px;
+        gap: 4px;
+        border: 1px solid rgba(255,255,255,0.08);
+    }
+    div[data-testid="stTabs"] button[role="tab"] {
+        border-radius: 8px !important;
+        color: #a0aec0 !important;
+        font-weight: 500 !important;
+        font-size: 14px !important;
+        padding: 8px 18px !important;
+    }
+    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+        background: rgba(99,102,241,0.25) !important;
+        color: #c7d2fe !important;
+        border-bottom: 2px solid #6366f1 !important;
+    }
+
+    .stat-card {
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.1);
+        border-radius: 12px;
+        padding: 18px 20px;
+        text-align: center;
+    }
+    .stat-value { font-size: 28px; font-weight: 700; color: #c7d2fe; }
+    .stat-label { font-size: 12px; color: #718096; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+
+    .table-wrapper {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 14px;
+        overflow: hidden;
+        margin-top: 16px;
+    }
+    .fmcsa-table { width: 100%; border-collapse: collapse; font-size: 13px; color: #e2e8f0; }
+    .fmcsa-table thead tr { background: rgba(99,102,241,0.12); border-bottom: 1px solid rgba(99,102,241,0.3); }
+    .fmcsa-table thead th { padding: 14px 16px; text-align: left; font-weight: 600; font-size: 12px; color: #a5b4fc; text-transform: uppercase; }
+    .fmcsa-table tbody tr { border-bottom: 1px solid rgba(255,255,255,0.04); }
+    .fmcsa-table tbody td { padding: 13px 16px; vertical-align: middle; }
+    .mc-cell { font-family: monospace; font-weight: 600; color: #a5b4fc; }
+    .name-cell { font-weight: 600; color: #f0f0f0; }
+    .entity-badge { padding: 3px 10px; border-radius: 20px; font-size: 11px; background: rgba(99,102,241,0.2); color: #a5b4fc; border: 1px solid rgba(99,102,241,0.3); }
+    .entity-badge-broker { padding: 3px 10px; border-radius: 20px; font-size: 11px; background: rgba(245,158,11,0.2); color: #fbbf24; border: 1px solid rgba(245,158,11,0.3); }
+    .status-active { color: #68d391; font-weight: 600; }
+    .status-inactive { color: #f6ad55; font-weight: 600; }
+    .status-oos { color: #fc8181; font-weight: 600; }
+    .status-dot-green { width:8px;height:8px;border-radius:50%;background:#48bb78;display:inline-block;margin-right:4px;}
+    .status-dot-orange { width:8px;height:8px;border-radius:50%;background:#ed8936;display:inline-block;margin-right:4px;}
+    .status-dot-red { width:8px;height:8px;border-radius:50%;background:#fc8181;display:inline-block;margin-right:4px;}
+
+    .export-btn-wrap { margin-top: 24px; text-align: center; }
+    .stDownloadButton > button {
+        background: linear-gradient(135deg, #7c3aed 0%, #ec4899 100%) !important;
+        border: none !important; border-radius: 14px !important; color: white !important;
+        font-weight: 700 !important; font-size: 16px !important; padding: 16px 48px !important; width: 60% !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ── Sidebar Account & Admin Controls ──────────────────────────────────────────
+with st.sidebar:
+    st.markdown("### 👤 User Account")
+    is_admin = user_info.get("is_admin", False)
+    role_badge = "👑 Super Admin" if is_admin else "👤 Standard User"
+    st.markdown(f"**User**: `{username}`")
+    st.markdown(f"**Role**: `{role_badge}`")
+
+    rem_min = int(remaining_sec // 60)
+    st.caption(f"⏳ Session Expires in: **{rem_min} mins**")
+
+    if st.button("🚪 Log Out", key="logout_btn"):
+        force_logout("User clicked log out.")
+
+    st.divider()
+
+    if is_admin:
+        st.markdown("### 🛡️ Admin Controls")
+        admin_mode = st.radio(
+            "Admin Actions",
+            ["Dashboard", "👥 Manage Users", "⚙️ Rate & Session Limits", "📊 Activity Audit Logs"],
+            key="admin_mode_select",
+        )
+
+        if admin_mode == "👥 Manage Users":
+            st.subheader("Create New User")
+            new_u = st.text_input("New Username", key="new_u_input")
+            new_p = st.text_input("New Password", type="password", key="new_p_input")
+            new_role = st.selectbox("Role", ["Standard User", "Super Admin"], key="new_role_input")
+            if st.button("Create Account", key="create_user_btn"):
+                is_adm = (new_role == "Super Admin")
+                succ, msg = db.create_user(username, new_u, new_p, is_admin=is_adm)
+                if succ:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+        elif admin_mode == "⚙️ Rate & Session Limits":
+            st.subheader("Configure Per-User Speed & Duration")
+            all_users = db.get_all_users()
+            u_names = [u["username"] for u in all_users]
+            if not u_names:
+                u_names = [username]
+            if username not in u_names:
+                u_names.append(username)
+
+            sel_u = st.selectbox("Select User", u_names, key="sel_user_config")
+            sel_u_data = next((u for u in all_users if u["username"] == sel_u), {})
+
+            curr_delay = int(sel_u_data.get("delay_ms", user_info.get("delay_ms", 500)))
+            curr_dur = float(sel_u_data.get("session_duration_hours", user_info.get("session_duration_hours", 3.0)))
+
+            new_delay = st.number_input("Request Delay (ms)", min_value=0, max_value=10000, value=curr_delay, step=100, key="new_delay_in")
+            new_dur = st.number_input("Session Timeout (hours)", min_value=0.5, max_value=72.0, value=curr_dur, step=0.5, key="new_dur_in")
+
+            if st.button("Save User Config", key="save_u_cfg"):
+                succ, msg = db.update_user_config(username, sel_u, new_delay, new_dur)
+                if succ or sel_u == username:
+                    if sel_u == username:
+                        st.session_state["user_info"]["session_duration_hours"] = float(new_dur)
+                        st.session_state["user_info"]["delay_ms"] = int(new_delay)
+                    st.success(f"Updated config for '{sel_u}' successfully.")
                     st.rerun()
                 else:
                     st.error(msg)
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()
 
-# ─── SESSION CHECK ───
-if not verify_active_session():
-    st.error("Logged in from another tab or device.")
-    st.session_state.authenticated = False
-    time.sleep(1.5)
+        elif admin_mode == "📊 Activity Audit Logs":
+            st.subheader("Latest Activity Logs (Max 200)")
+            logs_df = db.get_activity_logs(limit=200)
+            st.dataframe(logs_df, use_container_width=True)
+
+
+# ── Render Helper HTML Functions ──────────────────────────────────────────────
+def status_badge(status: str) -> str:
+    s = str(status).upper()
+    if "INACTIVE" in s:
+        return f'<span class="status-inactive"><span class="status-dot-orange"></span>INACTIVE</span>'
+    elif "ACTIVE" in s:
+        return f'<span class="status-active"><span class="status-dot-green"></span>ACTIVE</span>'
+    elif "OUT" in s or "OOS" in s:
+        return f'<span class="status-oos"><span class="status-dot-red"></span>OUT-OF-SERVICE</span>'
+    elif "NOT FOUND" in s:
+        return f'<span style="color:#4a5568;font-style:italic;">Not Found</span>'
+    return f'<span style="color:#a0aec0;">{status}</span>'
+
+
+def mc_cell_html(mc_str: str) -> str:
+    if str(mc_str).startswith("BROKER "):
+        parts = str(mc_str).split(" ", 1)
+        return f'<span style="color:#fbbf24;font-weight:700;">{parts[0]}</span> <span class="mc-cell">{parts[1]}</span>'
+    return f'<span class="mc-cell">{mc_str}</span>'
+
+
+def email_cell_html(email: str) -> str:
+    if email == "—" or not email:
+        return '<span style="color:#4a5568;font-style:italic;font-size:12px;">—</span>'
+    return f'<span style="color:#76e4f7;font-size:12px;">{email}</span>'
+
+
+def render_table(rows: List[dict]) -> str:
+    if not rows:
+        return '<p style="color:#4a5568;text-align:center;padding:32px;">No data to display.</p>'
+
+    header_cols = [
+        "MC Number", "Carrier / Broker Name", "Entity Type",
+        "Operating Status", "Phone Number", "Email Address", "Location"
+    ]
+    html = '<div class="table-wrapper"><table class="fmcsa-table"><thead><tr>'
+    for col in header_cols:
+        html += f"<th>{col}</th>"
+    html += "</tr></thead><tbody>"
+
+    for row in rows:
+        et = row.get("Entity Type", "CARRIER").upper()
+        badge_cls = "entity-badge-broker" if "BROKER" in et else "entity-badge"
+        name = row.get("Carrier Name", row.get("Broker Name", "—"))
+
+        html += "<tr>"
+        html += f'<td>{mc_cell_html(row.get("MC Number","—"))}</td>'
+        html += f'<td class="name-cell">{name}</td>'
+        html += f'<td><span class="{badge_cls}">{et}</span></td>'
+        html += f'<td>{status_badge(row.get("Operating Status","—"))}</td>'
+        html += f'<td style="color:#cbd5e0;font-size:13px;">{row.get("Phone Number","—")}</td>'
+        html += f'<td>{email_cell_html(row.get("Email Address","—"))}</td>'
+        html += f'<td style="color:#e2e8f0;font-size:13px;">{row.get("Location","—")}</td>'
+        html += "</tr>"
+
+    html += "</tbody></table></div>"
+    return html
+
+
+def df_from_results(rows: List[dict]) -> pd.DataFrame:
+    cols = ["MC Number", "Carrier Name", "Entity Type",
+            "Operating Status", "Phone Number", "Email Address", "Location"]
+    clean = []
+    for r in rows:
+        item = {c: r.get(c, "—") for c in cols}
+        if "Carrier Name" not in r and "Broker Name" in r:
+            item["Carrier Name"] = r["Broker Name"]
+        clean.append(item)
+    return pd.DataFrame(clean, columns=cols)
+
+
+def csv_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    return buf.getvalue().encode("utf-8")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN DASHBOARD UI
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown(
+    """
+    <div class="header-banner">
+        <div style="font-size:40px;">🚛</div>
+        <div>
+            <p class="header-title">CarrierChk Pro — MC Scraper</p>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown('<div class="input-card">', unsafe_allow_html=True)
+col1, col_filter, col2, col3, col4 = st.columns([2.0, 1.5, 1.2, 1.0, 1.2])
+
+with col1:
+    start_mc = st.number_input(
+        "Start MC Number",
+        min_value=1,
+        max_value=9999999,
+        value=int(st.session_state.start_mc_val),
+        step=1,
+        format="%d",
+        key="start_mc_input",
+    )
+
+with col_filter:
+    entity_filter = st.selectbox(
+        "Filter View",
+        ["All Records", "Carriers Only", "Brokers Only"],
+        key="entity_filter_select"
+    )
+
+with col2:
+    st.markdown("<br>", unsafe_allow_html=True)
+    scrape_btn = st.button("🔍 Start Scraping", type="primary", key="scrape_btn")
+
+with col3:
+    st.markdown("<br>", unsafe_allow_html=True)
+    stop_btn = st.button("⛔ Stop", type="secondary", key="stop_btn")
+
+with col4:
+    st.markdown("<br>", unsafe_allow_html=True)
+    clear_btn = st.button("🗑️ Clear History", key="clear_btn")
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+if scrape_btn:
+    st.session_state.stop_requested = False
+    st.session_state.current_mc = int(start_mc)
+    st.session_state.start_mc_val = int(start_mc)
+    st.session_state.scraping = True
+
+if stop_btn:
+    st.session_state.stop_requested = True
+    st.session_state.start_mc_val = int(st.session_state.current_mc)
+
+if clear_btn:
+    st.session_state.results = []
+    st.session_state.scraping = False
+    st.session_state.stop_requested = False
+    db.log_activity(username, "CLEAR_HISTORY", "User cleared all scraped history")
     st.rerun()
 
-# ─── MAIN APP ───
-with st.sidebar:
-    st.markdown(f"<h3 style='color:#00d4ff;'>👤 {st.session_state.current_user}</h3>", unsafe_allow_html=True)
-    st.markdown(f"<p style='color:#94a3b8; font-size:0.85rem;'>{'Admin' if st.session_state.is_admin else 'User'}</p>", unsafe_allow_html=True)
-    st.divider()
-    if st.button("Logout", use_container_width=True):
-        logout_user()
-    if st.session_state.is_admin:
-        st.divider()
-        st.markdown("<p style='color:#ffa502; font-size:0.8rem;'>Admin Panel</p>", unsafe_allow_html=True)
+if st.session_state.scraping:
+    status_text = st.empty()
+    live_table = st.empty()
+    count = len(st.session_state.results)
 
-st.markdown("<div class='app-title'>🚛 CarrierChk Pro</div>", unsafe_allow_html=True)
-st.markdown("<p style='color:#94a3b8; margin-bottom:24px;'>FMCSA Carrier Verification & Lead Harvesting</p>", unsafe_allow_html=True)
+    while not st.session_state.stop_requested:
+        mc = st.session_state.current_mc
 
-tab1, tab2, tab3 = st.tabs(["Lookup", "Harvest Engine", "Leads"])
+        status_text.markdown(
+            f'<p style="color:#a0aec0;font-size:13px;text-align:center;">🔄 Fetching <b style="color:#c7d2fe;">MC-{mc:07d}</b> &nbsp;·&nbsp; <b style="color:#68d391;">{count}</b> scraped so far</p>',
+            unsafe_allow_html=True,
+        )
 
-# ─── TAB 1: LOOKUP ───
-with tab1:
-    st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        search_query = st.text_input("Enter DOT, MC, Phone, or Email", placeholder="e.g. 1066434 or MC-322572", key="lookup_input")
-    with col2:
-        st.markdown("<br>", unsafe_allow_html=True)
-        search_btn = st.button("Search", use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+        result = scrape_mc(mc)
+        st.session_state.results.append(result)
+        st.session_state.current_mc += 1
+        count += 1
 
-    if search_btn and search_query:
-        with st.spinner("Fetching carrier data..."):
-            raw = get_carrier_info(search_query, CARRIER_TOKEN, CARRIER_API_URL)
-        if raw and "_error" not in raw:
-            info = parse_carrier_data(raw)
-            if info:
-                st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-                c1, c2, c3 = st.columns([2, 1, 1])
-                with c1:
-                    st.markdown(f"<h2 style='margin:0;'>{info['name']}</h2>", unsafe_allow_html=True)
-                    st.markdown(f"<p style='color:#94a3b8;'>📍 {info['location']}</p>", unsafe_allow_html=True)
-                with c2:
-                    badge_class = "badge-active" if info['is_active'] else "badge-inactive"
-                    st.markdown(f"<span class='{badge_class}'>{info['status']}</span>", unsafe_allow_html=True)
-                with c3:
-                    entity_badge = "badge-broker" if info['is_broker'] else "badge-active"
-                    st.markdown(f"<span class='{entity_badge}'>{info['entity_type']}</span>", unsafe_allow_html=True)
+        preview = st.session_state.results[-10:]
+        live_table.markdown(render_table(preview), unsafe_allow_html=True)
 
-                st.divider()
-                m1, m2, m3, m4 = st.columns(4)
-                with m1:
-                    st.markdown(f"<div class='metric-card'><div class='metric-value'>{info['dot']}</div><div class='metric-label'>USDOT</div></div>", unsafe_allow_html=True)
-                with m2:
-                    st.markdown(f"<div class='metric-card'><div class='metric-value'>{info['mc']}</div><div class='metric-label'>MC Number</div></div>", unsafe_allow_html=True)
-                with m3:
-                    st.markdown(f"<div class='metric-card'><div class='metric-value'>{info['power_units']}</div><div class='metric-label'>Power Units</div></div>", unsafe_allow_html=True)
-                with m4:
-                    st.markdown(f"<div class='metric-card'><div class='metric-value'>{info['drivers']}</div><div class='metric-label'>Drivers</div></div>", unsafe_allow_html=True)
+        user_delay = int(user_info.get("delay_ms", 500)) / 1000.0
+        if user_delay > 0:
+            time.sleep(user_delay)
 
-                st.divider()
-                d1, d2 = st.columns(2)
-                with d1:
-                    st.markdown("**Contact**")
-                    st.write(f"Phone: {info['phone']}")
-                    st.write(f"Email: {info['email']}")
-                    st.write(f"Safety: {info['safety']}")
-                with d2:
-                    st.markdown("**Insurance & Risk**")
-                    st.write(f"BI&PD: {info['bipd']}")
-                    st.write(f"Cargo: {info['cargo']}")
-                    st.write(f"Risk: {info['risk_flag']}")
-                st.markdown("</div>", unsafe_allow_html=True)
-            else:
-                st.error("Could not parse carrier data")
+    st.session_state.start_mc_val = int(st.session_state.current_mc)
+    db.log_activity(username, "HARVEST_MC", f"Scraped batch up to MC-{st.session_state.current_mc:07d} ({count} total)")
+
+    status_text.markdown(
+        f'<p style="color:#68d391;font-size:13px;text-align:center;">⛔ Stopped at <b>MC-{st.session_state.current_mc:07d}</b> &nbsp;·&nbsp; <b>{count}</b> total scraped</p>',
+        unsafe_allow_html=True,
+    )
+    st.session_state.scraping = False
+    st.rerun()
+
+results = st.session_state.results
+
+# Apply entity filter
+if entity_filter == "Carriers Only":
+    filtered_results = [r for r in results if "BROKER" not in str(r.get("Entity Type", "")).upper() and "BROKER" not in str(r.get("MC Number", "")).upper()]
+elif entity_filter == "Brokers Only":
+    filtered_results = [r for r in results if "BROKER" in str(r.get("Entity Type", "")).upper() or "BROKER" in str(r.get("MC Number", "")).upper()]
+else:
+    filtered_results = results
+
+found = [r for r in filtered_results if r.get("_found", False)]
+active = [r for r in found if "ACTIVE" in r.get("Operating Status", "").upper() and "IN" not in r.get("Operating Status", "").upper()]
+with_email = [r for r in active if r.get("Email Address", "—") not in ("—", "", None)]
+
+if filtered_results:
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    stats = [
+        (len(filtered_results), "Total Scraped", "#c7d2fe"),
+        (len(found), "Entities Found", "#68d391"),
+        (len(active), "Active Entities", "#48bb78"),
+        (len(with_email), "With Email", "#76e4f7"),
+    ]
+    for col, (val, label, color) in zip([sc1, sc2, sc3, sc4], stats):
+        with col:
+            st.markdown(
+                f'<div class="stat-card">'
+                f'<div class="stat-value" style="color:{color};">{val}</div>'
+                f'<div class="stat-label">{label}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    tab1, tab2, tab3 = st.tabs([
+        "📋  Complete Master Log",
+        "✅  Verified Leads (Active Only)",
+        "📧  Raw Active Email List",
+    ])
+
+    with tab1:
+        st.markdown(render_table(found if found else filtered_results), unsafe_allow_html=True)
+        df_all = df_from_results(found if found else filtered_results)
+        st.markdown('<div class="export-btn-wrap">', unsafe_allow_html=True)
+        st.download_button(
+            label="📥  Export Master Sheet to CSV",
+            data=csv_bytes(df_all),
+            file_name="carrierchk_master_log.csv",
+            mime="text/csv",
+            key="dl_master",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab2:
+        if active:
+            st.markdown(render_table(active), unsafe_allow_html=True)
+            df_active = df_from_results(active)
+            st.markdown('<div class="export-btn-wrap">', unsafe_allow_html=True)
+            st.download_button(
+                label="📥  Export Active Leads to CSV",
+                data=csv_bytes(df_active),
+                file_name="carrierchk_verified_leads.csv",
+                mime="text/csv",
+                key="dl_active",
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
         else:
-            err = raw.get("_error", "Unknown error") if raw else "No response"
-            st.error(f"API Error: {err}")
+            st.markdown(
+                '<p style="color:#4a5568;text-align:center;padding:48px;font-size:15px;">'
+                '🚫 No active records matching current selection. Run the scraper or adjust filters.</p>',
+                unsafe_allow_html=True,
+            )
 
-# ─── TAB 2: HARVEST ENGINE ───
-with tab2:
-    st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-    hc1, hc2, hc3 = st.columns(3)
-    with hc1:
-        start_mc = st.number_input("Start MC Number", min_value=1, value=int(st.session_state.get("current_mc", 1800000)), step=1, key="harvest_start")
-    with hc2:
-        harvest_count = st.number_input("Records to Harvest", min_value=1, max_value=500, value=50, step=10)
-    with hc3:
-        delay_ms = st.number_input("Delay (ms)", min_value=0, max_value=5000, value=500, step=100)
+    with tab3:
+        if with_email:
+            st.markdown(
+                '<div class="table-wrapper" style="padding:0;">'
+                + "".join(
+                    f'<div style="padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.05);display:flex;justify-content:space-between;align-items:center;">'
+                    f'<div>'
+                    f'<div style="color:#76e4f7;font-size:14px;">{r["Email Address"]}</div>'
+                    f'<div style="color:#e2e8f0;font-size:12px;">{r.get("Carrier Name", r.get("Broker Name", "—"))} &nbsp;·&nbsp; {r["MC Number"]} &nbsp;·&nbsp; {r.get("Location", "—")}</div>'
+                    f'</div>'
+                    f'<div style="color:#718096;font-size:11px;">{r.get("Phone Number", "—")}</div>'
+                    f'</div>'
+                    for r in with_email
+                )
+                + "</div>",
+                unsafe_allow_html=True,
+            )
+            df_email = df_from_results(with_email)
+            st.markdown('<div class="export-btn-wrap">', unsafe_allow_html=True)
+            st.download_button(
+                label="📥  Export Email List to CSV",
+                data=csv_bytes(df_email),
+                file_name="carrierchk_email_list.csv",
+                mime="text/csv",
+                key="dl_email",
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<p style="color:#4a5568;text-align:center;padding:48px;font-size:15px;">'
+                '📧 No emails found yet. Active entities without emails won\'t appear here.</p>',
+                unsafe_allow_html=True,
+            )
 
-    bc1, bc2, bc3 = st.columns(3)
-    with bc1:
-        if st.button("Start Live Engine", use_container_width=True, disabled=st.session_state.harvesting):
-            st.session_state.harvesting = True
-            st.session_state.harvest_log = []
-            st.rerun()
-    with bc2:
-        if st.button("STOP Engine", use_container_width=True, disabled=not st.session_state.harvesting):
-            st.session_state.harvesting = False
-            st.rerun()
-    with bc3:
-        if st.button("Clear Data", use_container_width=True):
-            st.session_state.harvested = []
-            st.session_state.harvest_log = []
-            st.session_state.harvesting = False
-            st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    # Running person animation when harvesting
-    if st.session_state.harvesting:
-        st.markdown("""
-        <div class="runner-box">
-            <div class="runner-emoji">🏃</div>
-            <div class="runner-text">Engine Running... Harvesting Live Data</div>
+else:
+    st.markdown(
+        """
+        <div style="text-align:center;padding:72px 32px;">
+            <div style="font-size:64px;margin-bottom:16px;">🚛</div>
+            <h3 style="color:#e2e8f0;font-size:20px;margin-bottom:8px;">Ready to Scrape</h3>
+            <p style="color:#718096;font-size:14px;max-width:400px;margin:0 auto;">
+                Enter a start MC number above, then click <strong style="color:#a5b4fc;">Start Scraping</strong>.<br>
+                Results appear in real-time as each carrier or broker is fetched.
+            </p>
         </div>
-        """, unsafe_allow_html=True)
-        run_harvest(int(start_mc), int(harvest_count), int(delay_ms), CARRIER_TOKEN, CARRIER_API_URL)
-        st.rerun()
-
-    if st.session_state.harvest_log:
-        st.markdown("<div class='glass-card' style='max-height:400px; overflow-y:auto;'>", unsafe_allow_html=True)
-        for log in reversed(st.session_state.harvest_log[-50:]):
-            st.write(log)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# ─── TAB 3: LEADS ───
-with tab3:
-    if st.session_state.harvested:
-        df = pd.DataFrame(st.session_state.harvested)
-        df["status_clean"] = df["status"]
-        df["entity_clean"] = df["entity_type"]
-
-        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        f1, f2 = st.columns(2)
-        with f1:
-            status_filter = st.multiselect("Filter by Status", options=df["status_clean"].unique().tolist(), default=df["status_clean"].unique().tolist())
-        with f2:
-            entity_filter = st.multiselect("Filter by Type", options=df["entity_clean"].unique().tolist(), default=df["entity_clean"].unique().tolist())
-
-        filtered = df[df["status_clean"].isin(status_filter) & df["entity_clean"].isin(entity_filter)]
-        st.dataframe(filtered[["name", "mc", "dot", "phone", "email", "location", "status", "entity_type", "risk_flag"]], use_container_width=True, hide_index=True)
-
-        csv_buf = io.StringIO()
-        filtered[["name", "mc", "dot", "phone", "email", "location", "status", "entity_type", "power_units", "drivers", "safety", "risk_flag"]].to_csv(csv_buf, index=False)
-        st.download_button("Download CSV", csv_buf.getvalue(), file_name=f"carrier_leads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-    else:
-        st.info("No harvested data yet. Go to the Harvest Engine tab to start collecting leads.")
+        """,
+        unsafe_allow_html=True,
+    )
