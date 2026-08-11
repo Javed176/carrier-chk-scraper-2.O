@@ -264,8 +264,7 @@ def login_user(email, password):
             return False, "Invalid credentials"
         new_token = str(uuid.uuid4())
         supabase.table("users").update({
-            "active_session_id": new_token,
-            "last_login": datetime.utcnow().isoformat()
+            "active_session_id": new_token
         }).eq("email", email).execute()
         st.session_state.authenticated = True
         st.session_state.current_user = email
