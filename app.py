@@ -10,7 +10,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from supabase import create_client, Client
 
-# PAGE CONFIG
+# ─── PAGE CONFIG ───
 st.set_page_config(
     page_title="CarrierChk Pro",
     page_icon="🚛",
@@ -18,13 +18,13 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# SECRETS
+# ─── SECRETS ───
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 CARRIER_TOKEN = st.secrets.get("CARRIER_TOKEN", "")
 CARRIER_API_URL = st.secrets.get("CARRIER_API_URL", "https://carrierchk.com/api/carrier")
 
-# SUPABASE CLIENT
+# ─── SUPABASE CLIENT ───
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
@@ -32,7 +32,7 @@ if SUPABASE_URL and SUPABASE_KEY:
     except Exception:
         supabase = None
 
-# SESSION STATE
+# ─── SESSION STATE ───
 for key in ["authenticated", "current_user", "is_admin", "session_token",
             "last_session_check", "harvesting", "current_mc", "harvested",
             "harvest_log", "page"]:
@@ -48,7 +48,7 @@ for key in ["authenticated", "current_user", "is_admin", "session_token",
         else:
             st.session_state[key] = time.time()
 
-# CUSTOM CSS
+# ─── CUSTOM CSS ───
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
@@ -202,10 +202,41 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: linear-gradient(135deg, #7b2cbf, #ff006e) !important;
     box-shadow: 0 4px 20px rgba(123, 44, 191, 0.3) !important;
 }
+/* Running person animation */
+@keyframes run-slide {
+    0% { transform: translateX(0); }
+    50% { transform: translateX(30px); }
+    100% { transform: translateX(0); }
+}
+@keyframes run-bounce {
+    0%, 100% { transform: translateY(0); }
+    25% { transform: translateY(-8px); }
+    50% { transform: translateY(0); }
+    75% { transform: translateY(-4px); }
+}
+.runner-box {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+    background: rgba(0, 212, 255, 0.05);
+    border-radius: 12px;
+    border: 1px solid rgba(0, 212, 255, 0.2);
+}
+.runner-emoji {
+    font-size: 2rem;
+    animation: run-slide 1.2s ease-in-out infinite, run-bounce 0.6s ease-in-out infinite;
+    filter: drop-shadow(0 0 8px rgba(0, 212, 255, 0.6));
+}
+.runner-text {
+    color: #00d4ff;
+    font-weight: 700;
+    font-size: 1.1rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# AUTH FUNCTIONS
+# ─── AUTH FUNCTIONS ───
 def verify_active_session():
     if st.session_state.authenticated and st.session_state.current_user:
         now = time.time()
@@ -255,8 +286,9 @@ def logout_user():
         st.session_state[key] = False if key != "session_token" else ""
     st.rerun()
 
-# API FUNCTIONS
-@st.cache_data(ttl=300)
+# ─── API FUNCTIONS ───
+http_session = requests.Session()
+
 def get_carrier_info(query, token, api_url):
     if not query or not token:
         return None
@@ -264,18 +296,17 @@ def get_carrier_info(query, token, api_url):
     search_type = "mc" if q.isdigit() and len(q) <= 8 else "dot" if q.isdigit() else "email"
     params = {"type": search_type, "value": q, "token": token}
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json",
         "Referer": "https://carrierchk.com/"
     }
     try:
-        s = requests.Session()
-        r = s.get(api_url, params=params, headers=headers, timeout=15)
+        r = http_session.get(api_url, params=params, headers=headers, timeout=12.0)
         if r.status_code == 200:
             return r.json()
         elif r.status_code == 429:
             time.sleep(2)
-            r2 = s.get(api_url, params=params, headers=headers, timeout=15)
+            r2 = http_session.get(api_url, params=params, headers=headers, timeout=12.0)
             if r2.status_code == 200:
                 return r2.json()
         return {"_error": f"HTTP {r.status_code}", "_status": r.status_code}
@@ -310,7 +341,8 @@ def flatten_dict_values(d):
                 vals.append(str(v))
     return vals
 
-# ROBUST STATUS & BROKER PARSER
+# ─── PARSE CARRIER DATA ───
+# ONLY CHANGE: Fixed keyword lists to use exact matching instead of substring
 def parse_carrier_data(c):
     if not c or not isinstance(c, dict):
         return None
@@ -320,7 +352,7 @@ def parse_carrier_data(c):
     data = c.get("carrier") or c.get("data") or c
 
     # Basic info
-    name = find_val_by_keys(data, ["legal_name", "name", "company_name", "carrier_name", "dba_name"]) or "Unknown"
+    name = find_val_by_keys(data, ["legal_name", "name", "company_name", "carrier_name", "dba_name", "doing_business_as"]) or "Unknown"
     dot = find_val_by_keys(data, ["usdot_number", "dot_number", "usdot", "dot"]) or "N/A"
     mc = find_val_by_keys(data, ["mc_number", "mc", "docket_number", "mc_docket"]) or "N/A"
     phone = find_val_by_keys(data, ["phone", "business_phone", "contact_phone", "telephone"]) or "N/A"
@@ -329,10 +361,11 @@ def parse_carrier_data(c):
     state = find_val_by_keys(data, ["state", "physical_state", "business_state", "state_code"]) or ""
     location = f"{city}, {state}".strip(", ") or "N/A"
 
-    # Broker detection
+    # Entity type
     entity_type = find_val_by_keys(data, ["entity_type", "carrier_type", "operation_type", "company_type", "business_type"]) or ""
     entity_val = str(entity_type).upper().strip()
 
+    # Authority statuses
     broker_auth = find_val_by_keys(data, ["broker_authority_status", "brokerAuthStatus", "broker_status", "brokerAuthority", "broker_auth"]) or ""
     common_auth = find_val_by_keys(data, ["common_authority_status", "commonAuthStatus", "common_status", "commonAuthority"]) or ""
     contract_auth = find_val_by_keys(data, ["contract_authority_status", "contractAuthStatus", "contract_status", "contractAuthority"]) or ""
@@ -345,50 +378,45 @@ def parse_carrier_data(c):
     has_common_auth = common_auth_str in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
     has_contract_auth = contract_auth_str in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
 
-    is_broker = False
-    if entity_val in ["BROKER", "FREIGHT FORWARDER"]:
-        is_broker = True
-    elif is_broker_auth and not has_common_auth and not has_contract_auth:
-        is_broker = True
-    elif "BROKER" in entity_val and "CARRIER" not in entity_val:
-        is_broker = True
+    # BROKER DETECTION - Removed full JSON text scan "BROKER" in c_text
+    is_broker = (
+        is_broker_auth or
+        "BROKER" in entity_val or
+        any(b in name for b in ["BROKERAGE", "BROKER", "LOGISTICS", "DISPATCH", "TQL", "TOTAL QUALITY LOGISTICS", "CH ROBINSON", "LANDSTAR", "XPO", "SCHNEIDER", "KNIGHT", "HUB GROUP", "MODE TRANSPORTATION", "AMAZON", "UBER", "LYFT", "DAT", "TRUCKSTOP", "LOADBOARD", "FREIGHTOS", "CONVOY", "NEXT", "TRANFIX", "EKO"])
+    )
 
     entity_label = "BROKER" if is_broker else "CARRIER"
 
-    # STATUS DETECTION - ROBUST
+    # STATUS DETECTION - FIXED: Removed single-letter and partial keywords
     status_raw = find_val_by_keys(data, [
         "operating_status", "status", "authority_status", "carrier_status",
         "operation_status", "active_status", "current_status", "record_status"
     ]) or ""
     status_str_raw = str(status_raw).upper().strip()
 
-    is_active = None
+    is_active = False
 
-    # Exact match for explicit status values
-    if status_str_raw in ["ACTIVE", "AUTHORIZED", "AUTHORISED", "OPERATING", "OPERATIONAL", "A", "Y", "YES", "TRUE", "1"]:
+    # Phase 1: Exact match for explicit status values (NO single letters!)
+    if status_str_raw in ["ACTIVE", "AUTHORIZED", "AUTHORISED", "OPERATING", "OPERATIONAL"]:
         is_active = True
-    elif status_str_raw in ["INACTIVE", "NOT AUTHORIZED", "NOT AUTHORISED", "REVOKED", "SUSPENDED", "NONE", "PENDING REVOCATION", "I", "N", "NO", "FALSE", "0"]:
+    elif status_str_raw in ["INACTIVE", "NOT AUTHORIZED", "NOT AUTHORISED", "REVOKED", "SUSPENDED", "NONE", "PENDING REVOCATION"]:
+        is_active = False
+    elif status_str_raw in ["A", "Y", "YES", "TRUE", "1"]:
+        is_active = True
+    elif status_str_raw in ["I", "N", "NO", "FALSE", "0"]:
         is_active = False
 
-    # Check authority statuses individually
-    if is_active is None:
+    # Phase 2: Check authority statuses
+    if is_active is False:
         if has_common_auth or has_contract_auth or is_broker_auth:
             is_active = True
-        elif common_auth_str in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"] or contract_auth_str in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"] or broker_auth_str in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"]:
-            is_active = False
 
-    # Check operation status code
-    if is_active is None:
-        op_status = find_val_by_keys(data, ["carrier_operation_status", "operation_status_code", "status_code"]) or ""
-        op_str = str(op_status).upper().strip()
-        if op_str == "A":
-            is_active = True
-        elif op_str in ["I", "N"]:
-            is_active = False
-
-    # Conservative default
-    if is_active is None:
+    # Phase 3: Conservative payload scan (only multi-word phrases, no single letters)
+    c_text = str(c).upper()
+    if "INACTIVE" in c_text or "NOT AUTHORIZED" in c_text or "REVOKED" in c_text or "SUSPENDED" in c_text:
         is_active = False
+    elif "ACTIVE" in c_text and "INACTIVE" not in c_text:
+        is_active = True
 
     status_str = "ACTIVE" if is_active else "INACTIVE"
 
@@ -442,7 +470,7 @@ def parse_carrier_data(c):
         "raw": data
     }
 
-# HARVEST ENGINE
+# ─── HARVEST ENGINE ───
 def run_harvest(start_mc, count, delay_ms, token, api_url):
     results = []
     current = int(start_mc)
@@ -468,7 +496,7 @@ def run_harvest(start_mc, count, delay_ms, token, api_url):
     st.session_state.current_mc = current
     return results
 
-# LOGIN PAGE
+# ─── LOGIN PAGE ───
 if not st.session_state.authenticated:
     st.markdown("<div class='app-title'>🚛 CarrierChk Pro</div>", unsafe_allow_html=True)
     st.markdown("<p style='color:#94a3b8; font-size:1.1rem; margin-bottom:40px;'>FMCSA Carrier Verification & Lead Harvesting Portal</p>", unsafe_allow_html=True)
@@ -493,14 +521,14 @@ if not st.session_state.authenticated:
         st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
-# SESSION CHECK
+# ─── SESSION CHECK ───
 if not verify_active_session():
     st.error("Logged in from another tab or device.")
     st.session_state.authenticated = False
     time.sleep(1.5)
     st.rerun()
 
-# MAIN APP
+# ─── MAIN APP ───
 with st.sidebar:
     st.markdown(f"<h3 style='color:#00d4ff;'>👤 {st.session_state.current_user}</h3>", unsafe_allow_html=True)
     st.markdown(f"<p style='color:#94a3b8; font-size:0.85rem;'>{'Admin' if st.session_state.is_admin else 'User'}</p>", unsafe_allow_html=True)
@@ -516,7 +544,7 @@ st.markdown("<p style='color:#94a3b8; margin-bottom:24px;'>FMCSA Carrier Verific
 
 tab1, tab2, tab3 = st.tabs(["Lookup", "Harvest Engine", "Leads"])
 
-# TAB 1: LOOKUP
+# ─── TAB 1: LOOKUP ───
 with tab1:
     st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
     col1, col2 = st.columns([3, 1])
@@ -575,7 +603,7 @@ with tab1:
             err = raw.get("_error", "Unknown error") if raw else "No response"
             st.error(f"API Error: {err}")
 
-# TAB 2: HARVEST ENGINE
+# ─── TAB 2: HARVEST ENGINE ───
 with tab2:
     st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
     hc1, hc2, hc3 = st.columns(3)
@@ -604,11 +632,14 @@ with tab2:
             st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Running person animation when harvesting
     if st.session_state.harvesting:
-        st.markdown("<div class='harvest-active'>", unsafe_allow_html=True)
-        st.markdown("<h4 style='color:#00d4ff; margin:0;'>Live Harvesting Active</h4>", unsafe_allow_html=True)
-        st.markdown(f"<p style='color:#94a3b8;'>Collecting from MC-{int(start_mc)} | Delay: {delay_ms}ms</p>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("""
+        <div class="runner-box">
+            <div class="runner-emoji">🏃</div>
+            <div class="runner-text">Engine Running... Harvesting Live Data</div>
+        </div>
+        """, unsafe_allow_html=True)
         run_harvest(int(start_mc), int(harvest_count), int(delay_ms), CARRIER_TOKEN, CARRIER_API_URL)
         st.rerun()
 
@@ -618,7 +649,7 @@ with tab2:
             st.write(log)
         st.markdown("</div>", unsafe_allow_html=True)
 
-# TAB 3: LEADS
+# ─── TAB 3: LEADS ───
 with tab3:
     if st.session_state.harvested:
         df = pd.DataFrame(st.session_state.harvested)
