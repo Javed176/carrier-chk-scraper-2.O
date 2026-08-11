@@ -263,6 +263,8 @@ def parse_carrier_data(mc_number, status_code, raw_data):
         else:
             is_active = False
 
+
+    status_str = "🟢 ACTIVE" if is_active else "🔴 INACTIVE"
     # ═══════════════════════════════════════════════════════
     # BROKER VS CARRIER DETECTION
     # ═══════════════════════════════════════════════════════
