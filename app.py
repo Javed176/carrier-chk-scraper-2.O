@@ -368,7 +368,7 @@ if not _render_login_screen():
     st.stop()
 
 # ── Session Lockout & Expiration Checks ───────────────────────────────────────
-user_info = st.session_state.get("user_info", {})
+user_info = st.session_state.get("user_info") or {}
 username = user_info.get("username", "User")
 session_token = user_info.get("session_token", "")
 session_duration_h = float(user_info.get("session_duration_hours", 3.0))
