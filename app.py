@@ -262,6 +262,75 @@ def parse_carrier_data(mc_number, status_code, raw_data):
             is_active = True
         else:
             is_active = False
+
+    # ═══════════════════════════════════════════════════════
+    # BROKER VS CARRIER DETECTION
+    # ═══════════════════════════════════════════════════════
+    def _has_broker_key(d, depth=0):
+        if not isinstance(d, dict) or depth > 5:
+            return False
+        broker_keys = ["broker_authority_status", "brokerAuthStatus", "broker_authority",
+                       "brokerAuthority", "broker_status", "is_broker", "broker_type"]
+        for k in d.keys():
+            if any(bk.lower() in k.lower() for bk in broker_keys):
+                return True
+            v = d[k]
+            if isinstance(v, dict) and _has_broker_key(v, depth+1):
+                return True
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict) and _has_broker_key(item, depth+1):
+                        return True
+        return False
+
+    entity_val = str(find_val_by_keys(c, [
+        "entity_type", "entitytype", "operating_type", "operatingtype",
+        "carrier_type", "type", "authority_type"
+    ]) or "").upper()
+
+    broker_auth = find_val_by_keys(c, ["broker_authority_status", "brokerAuthStatus",
+                                        "broker_authority", "brokerAuthority"])
+    is_broker_auth = str(broker_auth).upper() in ["Y", "ACTIVE", "AUTHORIZED", "TRUE", "A", "YES"]
+    has_broker_fields = _has_broker_key(c)
+
+    known_broker_names = ["BROKER", "BROKERAGE", "3PL", "GLOBAL LOGISTICS", "ECHO GLOBAL",
+                          "CH ROBINSON", "TQL", "TOTAL QUALITY LOGISTICS", "RXO", "COYOTE", "UBER FREIGHT"]
+
+    is_broker = (
+        is_broker_auth or
+        has_broker_fields or
+        "BROKER" in entity_val or
+        any(b in name for b in known_broker_names)
+    )
+    entity_label = "BROKER" if is_broker else "CARRIER"
+
+    # --- CONTACT INFO & LOCATION ---
+    def flatten_dict_values(d):
+        vals = []
+        for v in d.values():
+            if isinstance(v, dict): vals.extend(flatten_dict_values(v))
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, dict): vals.extend(flatten_dict_values(item))
+                    else: vals.append(str(item))
+            else: vals.append(str(v))
+        return vals
+
+    all_payload_text = " ".join(flatten_dict_values(c)).upper()
+
+    phone = str(find_val_by_keys(c, ["phone", "cell_phone", "telephone", "phone_number"]) or "N/A").strip()
+    if phone.lower() in ["none", "null", "", "not listed"]: phone = "N/A"
+
+    email = str(find_val_by_keys(c, ["email_address", "email", "emailaddress"]) or "").strip()
+    if not email or email.lower() in ["none", "null", "not listed", "", "n/a"]:
+        emails_found = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', all_payload_text)
+        valid_emails = [e for e in emails_found if not any(x in e.lower() for x in ["carrierchk", "example.com"])]
+        email = valid_emails[0] if valid_emails else "Not Listed"
+
+    city = str(find_val_by_keys(c, ["phy_city", "city", "physical_city"]) or "").strip()
+    state = str(find_val_by_keys(c, ["phy_state", "state", "physical_state"]) or "").strip()
+    location = f"{city}, {state}".strip(", ") if city or state else "N/A"
+
     return {
         "MC Number": f"MC-{mc_number}",
         "Carrier Name": name,
