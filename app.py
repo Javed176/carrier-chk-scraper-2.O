@@ -1,635 +1,643 @@
-import os, time, uuid, json, re, requests, pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
+import requests
+import time
+import json
+import csv
+import io
+import re
+import uuid
+import pandas as pd
+from datetime import datetime, timedelta
 from supabase import create_client, Client
 
-st.set_page_config(page_title="Carrier Automation Portal", layout="wide")
+# PAGE CONFIG
+st.set_page_config(
+    page_title="CarrierChk Pro",
+    page_icon="🚛",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# MODERN 3D GLASSMORPHISM THEME
-# ═══════════════════════════════════════════════════════════════════════════
+# SECRETS
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
+CARRIER_TOKEN = st.secrets.get("CARRIER_TOKEN", "")
+CARRIER_API_URL = st.secrets.get("CARRIER_API_URL", "https://carrierchk.com/api/carrier")
+
+# SUPABASE CLIENT
+supabase = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception:
+        supabase = None
+
+# SESSION STATE
+for key in ["authenticated", "current_user", "is_admin", "session_token",
+            "last_session_check", "harvesting", "current_mc", "harvested",
+            "harvest_log", "page"]:
+    if key not in st.session_state:
+        if key in ["authenticated", "is_admin", "harvesting"]:
+            st.session_state[key] = False
+        elif key in ["current_user", "session_token", "page"]:
+            st.session_state[key] = ""
+        elif key == "current_mc":
+            st.session_state[key] = 1800000
+        elif key in ["harvested", "harvest_log"]:
+            st.session_state[key] = []
+        else:
+            st.session_state[key] = time.time()
+
+# CUSTOM CSS
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&display=swap');
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    .stApp { background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%); background-attachment: fixed; }
-    .main-title { font-family: 'Space Grotesk', sans-serif; font-size: 3.2rem; font-weight: 800; text-align: center; margin-bottom: 0.3rem; background: linear-gradient(135deg, #00f5d4 0%, #00bbf9 50%, #9b5de5 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; text-shadow: 0 0 60px rgba(0, 245, 212, 0.3); letter-spacing: -1px; }
-    .subtitle { font-size: 1.05rem; color: rgba(255,255,255,0.6); text-align: center; margin-bottom: 2rem; max-width: 600px; margin-left: auto; margin-right: auto; font-weight: 400; }
-    .search-container { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-radius: 24px; padding: 2.5rem; margin-bottom: 2rem; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1); }
-    .info-card { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-radius: 20px; padding: 1.8rem; margin-bottom: 1.2rem; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(255, 255, 255, 0.05); transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
-    .info-card:hover { transform: translateY(-4px) scaleX(1.01); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3), 0 0 30px rgba(0, 245, 212, 0.1); border-color: rgba(0, 245, 212, 0.2); }
-    .info-card h3 { margin-top: 0; margin-bottom: 1.2rem; color: #fff; font-size: 1.15rem; font-weight: 700; font-family: 'Space Grotesk', sans-serif; border-bottom: 2px solid; border-image: linear-gradient(90deg, #00f5d4, #9b5de5) 1; padding-bottom: 0.7rem; display: flex; align-items: center; gap: 0.5rem; }
-    .info-row { display: flex; justify-content: space-between; padding: 0.75rem 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
-    .info-row:last-child { border-bottom: none; }
-    .info-label { color: rgba(255,255,255,0.5); font-weight: 500; font-size: 0.9rem; }
-    .info-value { color: #fff; font-weight: 600; text-align: right; font-size: 0.95rem; }
-    .badge { display: inline-block; padding: 5px 14px; border-radius: 50px; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; }
-    .badge-active { background: rgba(0, 245, 212, 0.15); color: #00f5d4; border: 1px solid rgba(0, 245, 212, 0.3); box-shadow: 0 0 15px rgba(0, 245, 212, 0.2); }
-    .badge-inactive { background: rgba(255, 71, 87, 0.15); color: #ff4757; border: 1px solid rgba(255, 71, 87, 0.3); box-shadow: 0 0 15px rgba(255, 71, 87, 0.2); }
-    .badge-pending { background: rgba(255, 193, 7, 0.15); color: #ffc107; border: 1px solid rgba(255, 193, 7, 0.3); box-shadow: 0 0 15px rgba(255, 193, 7, 0.2); }
-    .risk-green { color: #00f5d4; font-weight: 700; } .risk-orange { color: #ffc107; font-weight: 700; } .risk-red { color: #ff4757; font-weight: 700; }
-    .stats-bar { display: flex; justify-content: center; gap: 2.5rem; margin: 2rem 0; flex-wrap: wrap; }
-    .stat-item { display: flex; align-items: center; gap: 0.6rem; color: rgba(255,255,255,0.6); font-size: 0.9rem; font-weight: 500; background: rgba(255,255,255,0.05); padding: 0.6rem 1.2rem; border-radius: 12px; border: 1px solid rgba(255,255,255,0.08); }
-    .stat-icon { font-size: 1.1rem; }
-    .footer { text-align: center; color: rgba(255,255,255,0.35); font-size: 0.85rem; margin-top: 3rem; padding-top: 2rem; border-top: 1px solid rgba(255,255,255,0.08); }
-    div[data-baseweb="input"] > div { background: rgba(255,255,255,0.05) !important; border: 1px solid rgba(255,255,255,0.1) !important; border-radius: 14px !important; color: white !important; }
-    div[data-baseweb="input"] > div:focus-within { border-color: #00f5d4 !important; box-shadow: 0 0 20px rgba(0, 245, 212, 0.15) !important; }
-    .stButton > button { border-radius: 14px !important; font-weight: 600 !important; letter-spacing: 0.5px !important; transition: all 0.3s ease !important; border: none !important; }
-    .stButton > button:hover { transform: translateY(-2px) !important; box-shadow: 0 8px 25px rgba(0, 245, 212, 0.3) !important; }
-    .stButton > button[kind="primary"] { background: linear-gradient(135deg, #00f5d4 0%, #00bbf9 100%) !important; color: #0f0c29 !important; }
-    .stButton > button[kind="secondary"] { background: rgba(255,255,255,0.08) !important; color: white !important; border: 1px solid rgba(255,255,255,0.15) !important; }
-    button[data-baseweb="tab"] { color: rgba(255,255,255,0.5) !important; font-weight: 600 !important; }
-    button[data-baseweb="tab"][aria-selected="true"] { color: #00f5d4 !important; }
-    section[data-testid="stSidebar"] { background: rgba(15, 12, 41, 0.95) !important; backdrop-filter: blur(20px) !important; border-right: 1px solid rgba(255,255,255,0.08) !important; }
-    details { background: rgba(255,255,255,0.03) !important; border: 1px solid rgba(255,255,255,0.08) !important; border-radius: 16px !important; }
-    div[data-testid="stMetric"] { background: rgba(255,255,255,0.03) !important; border-radius: 16px !important; padding: 1rem !important; border: 1px solid rgba(255,255,255,0.08) !important; }
-    div[data-testid="stMetric"] label { color: rgba(255,255,255,0.5) !important; }
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] { color: #00f5d4 !important; font-weight: 700 !important; }
-    .stDownloadButton button { border-radius: 12px !important; background: linear-gradient(135deg, #9b5de5 0%, #f15bb5 100%) !important; color: white !important; border: none !important; font-weight: 600 !important; }
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: rgba(255,255,255,0.02); }
-    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.stApp {
+    background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+    color: #e2e8f0;
+}
+.glass-card {
+    background: rgba(255, 255, 255, 0.05);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 16px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.glass-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 255, 255, 0.15);
+}
+.app-title {
+    font-size: 2.8rem;
+    font-weight: 800;
+    background: linear-gradient(90deg, #00d4ff, #7b2cbf, #ff006e);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-shadow: 0 0 40px rgba(0, 212, 255, 0.3);
+    letter-spacing: -1px;
+    margin-bottom: 4px;
+}
+.badge-active {
+    display: inline-block;
+    padding: 6px 16px;
+    border-radius: 20px;
+    background: rgba(0, 255, 136, 0.1);
+    border: 1px solid rgba(0, 255, 136, 0.4);
+    color: #00ff88;
+    font-weight: 700;
+    font-size: 0.85rem;
+    box-shadow: 0 0 12px rgba(0, 255, 136, 0.2);
+}
+.badge-inactive {
+    display: inline-block;
+    padding: 6px 16px;
+    border-radius: 20px;
+    background: rgba(255, 71, 87, 0.1);
+    border: 1px solid rgba(255, 71, 87, 0.4);
+    color: #ff4757;
+    font-weight: 700;
+    font-size: 0.85rem;
+    box-shadow: 0 0 12px rgba(255, 71, 87, 0.2);
+}
+.badge-broker {
+    display: inline-block;
+    padding: 6px 16px;
+    border-radius: 20px;
+    background: rgba(255, 165, 2, 0.1);
+    border: 1px solid rgba(255, 165, 2, 0.4);
+    color: #ffa502;
+    font-weight: 700;
+    font-size: 0.85rem;
+    box-shadow: 0 0 12px rgba(255, 165, 2, 0.2);
+}
+.stButton>button {
+    background: linear-gradient(135deg, #00d4ff, #7b2cbf) !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 12px !important;
+    padding: 12px 28px !important;
+    font-weight: 700 !important;
+    font-size: 1rem !important;
+    box-shadow: 0 4px 20px rgba(0, 212, 255, 0.3) !important;
+    transition: all 0.3s ease !important;
+}
+.stButton>button:hover {
+    transform: translateY(-2px) scale(1.02) !important;
+    box-shadow: 0 8px 30px rgba(0, 212, 255, 0.5) !important;
+}
+.stTextInput>div>div>input, .stNumberInput>div>div>input {
+    background: rgba(255, 255, 255, 0.05) !important;
+    border: 1px solid rgba(255, 255, 255, 0.1) !important;
+    border-radius: 12px !important;
+    color: #e2e8f0 !important;
+    padding: 14px 18px !important;
+    font-size: 1rem !important;
+}
+.stTextInput>div>div>input:focus, .stNumberInput>div>div>input:focus {
+    border-color: #00d4ff !important;
+    box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.15) !important;
+}
+[data-testid="stSidebar"] {
+    background: rgba(15, 12, 41, 0.8) !important;
+    backdrop-filter: blur(20px) !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.05) !important;
+}
+.stTabs [data-baseweb="tab-list"] {
+    background: rgba(255, 255, 255, 0.03) !important;
+    border-radius: 12px !important;
+    padding: 4px !important;
+    gap: 4px !important;
+}
+.stTabs [data-baseweb="tab"] {
+    color: #94a3b8 !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+    padding: 10px 20px !important;
+}
+.stTabs [aria-selected="true"] {
+    background: rgba(0, 212, 255, 0.15) !important;
+    color: #00d4ff !important;
+}
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+.metric-card {
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.metric-value {
+    font-size: 1.8rem;
+    font-weight: 800;
+    color: #00d4ff;
+}
+.metric-label {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-top: 4px;
+}
+@keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.2); }
+    50% { box-shadow: 0 0 40px rgba(0, 212, 255, 0.5); }
+}
+.harvest-active {
+    animation: pulse-glow 2s ease-in-out infinite;
+    border: 1px solid rgba(0, 212, 255, 0.4);
+    border-radius: 16px;
+    padding: 20px;
+    background: rgba(0, 212, 255, 0.05);
+}
+.stDownloadButton>button {
+    background: linear-gradient(135deg, #7b2cbf, #ff006e) !important;
+    box-shadow: 0 4px 20px rgba(123, 44, 191, 0.3) !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
-
-# --- CONFIGURATION ---
-SUPABASE_URL = st.secrets.get("SUPABASE_URL") or os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY") or os.environ.get("SUPABASE_KEY")
-CARRIER_TOKEN = st.secrets.get("CARRIER_TOKEN") or os.environ.get("CARRIER_TOKEN")
-CARRIER_API_URL = st.secrets.get("CARRIER_API_URL") or os.environ.get("CARRIER_API_URL")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("🔑 Missing SUPABASE_URL or SUPABASE_KEY in secrets.")
-    st.stop()
-
-ALL_US_STATES = [
-    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS",
-    "KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY",
-    "NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY","DC"
-]
-
-@st.cache_resource
-def get_supabase() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
-
-@st.cache_resource
-def get_http() -> requests.Session:
-    s = requests.Session()
-    s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/json"})
-    return s
-
-supabase = get_supabase()
-http_session = get_http()
-
-# --- BACKEND UTILITIES ---
-def log_activity(email, action, detail=""):
-    try:
-        supabase.table("activity_logs").insert({"email": email, "action": action, "detail": detail}).execute()
-    except Exception:
-        pass
-
-def get_system_config():
-    config = {"throttle_delay_ms": 500.0, "override_global_speed": False}
-    try:
-        res = supabase.table("system_config").select("*").execute()
-        for r in res.data:
-            if r["key"] == "throttle_delay_ms": config["throttle_delay_ms"] = float(r["value"])
-            elif r["key"] == "override_global_speed": config["override_global_speed"] = str(r["value"]).upper() == "TRUE"
-    except Exception:
-        pass
-    return config
-
-def update_global_config(delay_ms, override_bool):
-    try:
-        supabase.table("system_config").upsert({"key": "throttle_delay_ms", "value": f"{delay_ms:.4f}"}, on_conflict="key").execute()
-        supabase.table("system_config").upsert({"key": "override_global_speed", "value": str(override_bool).upper()}, on_conflict="key").execute()
-        return True
-    except Exception as e:
-        st.error(f"Config error: {e}")
-        return False
-
-def get_user_settings(email):
-    try:
-        res = supabase.table("users").select("delay_ms, session_duration_hours").eq("email", email).execute()
-        if res.data:
-            return float(res.data[0].get("delay_ms", 500.0)), float(res.data[0].get("session_duration_hours", 3.0))
-    except Exception:
-        pass
-    return 500.0, 3.0
-
-# --- RECURSIVE DICTIONARY SEARCH HELPER ---
-def find_val_by_keys(d, target_keys):
-    if not isinstance(d, dict):
-        return None
-    for k, v in d.items():
-        if k.lower() in [tk.lower() for tk in target_keys]:
-            if v is not None and str(v).strip() != "":
-                return v
-        if isinstance(v, dict):
-            res = find_val_by_keys(v, target_keys)
-            if res is not None:
-                return res
-    return None
-
-# --- ROBUST SINGLE API CALLER WITH BUILT-IN 429 BACKOFF ---
-def get_carrier_info(mc_number, token, retries=6):
-    params = {"type": "mc", "value": str(mc_number).strip(), "token": token}
-    
-    for attempt in range(retries):
-        try:
-            res = http_session.get(CARRIER_API_URL, params=params, timeout=12.0)
-            
-            if res.status_code == 200:
-                return 200, res.json()
-            elif res.status_code in [404, 400]:
-                return res.status_code, {"not_found": True}
-            elif res.status_code == 429:
-                sleep_time = 2.5 * (attempt + 1)
-                time.sleep(sleep_time)
-                continue
-            elif res.status_code in [500, 502, 503, 504]:
-                time.sleep(2.0 * (attempt + 1))
-                continue
-        except (requests.exceptions.Timeout, requests.exceptions.RequestException):
-            time.sleep(2.0)
-                
-    return 429, {"throttled": True}
-
-def parse_carrier_data(mc_number, status_code, raw_data):
-    if status_code == 429 or (isinstance(raw_data, dict) and raw_data.get("throttled")):
-        return {
-            "MC Number": f"MC-{mc_number}",
-            "Carrier Name": "⚠️ API THROTTLED (Retrying)",
-            "Entity Type": "N/A",
-            "Operating Status": "⚠️ UNKNOWN",
-            "Phone Number": "N/A",
-            "Email Address": "N/A",
-            "Location": "N/A",
-            "Raw Payload": raw_data
-        }
-
-    if status_code in [404, 400] or not isinstance(raw_data, dict) or raw_data.get("not_found") is True:
-        return {
-            "MC Number": f"MC-{mc_number}",
-            "Carrier Name": "DOCKET NOT FOUND",
-            "Entity Type": "N/A",
-            "Operating Status": "❌ NOT FOUND",
-            "Phone Number": "N/A",
-            "Email Address": "N/A",
-            "Location": "N/A",
-            "Raw Payload": raw_data
-        }
-
-    c = raw_data.get("carrier") or raw_data.get("data") or raw_data
-    if not isinstance(c, dict) or not c:
-        return {
-            "MC Number": f"MC-{mc_number}",
-            "Carrier Name": "DOCKET NOT FOUND",
-            "Entity Type": "N/A",
-            "Operating Status": "❌ NOT FOUND",
-            "Phone Number": "N/A",
-            "Email Address": "N/A",
-            "Location": "N/A",
-            "Raw Payload": raw_data
-        }
-
-    name = str(c.get("dba_name") or c.get("legal_name") or c.get("name") or "N/A").strip().upper()
-    if name in ["NONE", "NULL", "", "N/A", "NOT FOUND"]:
-        return {
-            "MC Number": f"MC-{mc_number}",
-            "Carrier Name": "DOCKET NOT FOUND",
-            "Entity Type": "N/A",
-            "Operating Status": "❌ NOT FOUND",
-            "Phone Number": "N/A",
-            "Email Address": "N/A",
-            "Location": "N/A",
-            "Raw Payload": raw_data
-        }
-
-    # --- 1. ROBUST MULTI-TIER OPERATING STATUS DETECTION ---
-    status_raw = str(find_val_by_keys(c, [
-        "status", "operating_status", "carrier_status", "authority_status", 
-        "common_authority_status", "contract_authority_status", "commonStatus", "contractStatus"
-    ]) or "").upper().strip()
-    
-    allowed_val = find_val_by_keys(c, [
-        "allowed_to_operate", "allowedToOperate", "active", "is_active", 
-        "common_allowed_to_operate", "contract_allowed_to_operate"
-    ])
-    allowed_str = str(allowed_val).upper().strip() if allowed_val is not None else ""
-
-    # ═══════════════════════════════════════════════════════
-    # FIXED STATUS DETECTION: Exact match for short keywords
-    # ═══════════════════════════════════════════════════════
-    inactive_keywords = [
-        "INACTIVE", "REVOKED", "SUSPENDED", "CANCELED", "CANCELLED",
-        "DENIED", "NOT AUTHORIZED", "OUT OF SERVICE", "NO AUTHORITY", "NOT ACTIVE"
-    ]
-    active_keywords = [
-        "ACTIVE", "AUTHORIZED", "YES", "TRUE", "OPERATING"
-    ]
-
-    is_active = None
-
-    # Phase 1: Check explicit status string
-    if status_raw:
-        # Exact single-char codes (e.g., "A"=Active, "I"=Inactive)
-        if status_raw in ["I", "N"]:
-            is_active = False
-        elif status_raw in ["A", "Y"]:
-            is_active = True
-        # Multi-word substring checks
-        elif any(kw in status_raw for kw in inactive_keywords):
-            is_active = False
-        elif any(kw in status_raw for kw in active_keywords):
-            is_active = True
-
-    # Phase 2: Check boolean flags
-    if is_active is None:
-        if allowed_val is False or allowed_str in ["N", "NO", "FALSE", "0", "INACTIVE", "REVOKED"]:
-            is_active = False
-        elif allowed_val is True or allowed_str in ["Y", "YES", "TRUE", "1", "ACTIVE", "AUTHORIZED"]:
-            is_active = True
-
-    # Phase 3: Fallback payload scan (conservative)
-    if is_active is None:
-        payload_text = json.dumps(c).upper()
-        if any(term in payload_text for term in ["NOT AUTHORIZED", "AUTHORITY REVOKED", "SUSPENDED", "INACTIVE", "OUT OF SERVICE"]):
-            is_active = False
-        elif any(term in payload_text for term in ["ACTIVE AUTHORITY", "AUTHORIZED TO OPERATE", "OPERATING AUTHORITY"]):
-            is_active = True
-        else:
-            is_active = False
-
-
-    status_str = "🟢 ACTIVE" if is_active else "🔴 INACTIVE"
-    # ═══════════════════════════════════════════════════════
-    # BROKER VS CARRIER DETECTION
-    # ═══════════════════════════════════════════════════════
-    def _has_broker_key(d, depth=0):
-        if not isinstance(d, dict) or depth > 5:
-            return False
-        broker_keys = ["broker_authority_status", "brokerAuthStatus", "broker_authority",
-                       "brokerAuthority", "broker_status", "is_broker", "broker_type"]
-        for k in d.keys():
-            if any(bk.lower() in k.lower() for bk in broker_keys):
-                return True
-            v = d[k]
-            if isinstance(v, dict) and _has_broker_key(v, depth+1):
-                return True
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict) and _has_broker_key(item, depth+1):
-                        return True
-        return False
-
-    entity_val = str(find_val_by_keys(c, [
-        "entity_type", "entitytype", "operating_type", "operatingtype",
-        "carrier_type", "type", "authority_type"
-    ]) or "").upper()
-
-    broker_auth = find_val_by_keys(c, ["broker_authority_status", "brokerAuthStatus",
-                                        "broker_authority", "brokerAuthority"])
-    is_broker_auth = str(broker_auth).upper() in ["Y", "ACTIVE", "AUTHORIZED", "TRUE", "A", "YES"]
-    has_broker_fields = _has_broker_key(c)
-
-    known_broker_names = ["BROKER", "BROKERAGE", "3PL", "GLOBAL LOGISTICS", "ECHO GLOBAL",
-                          "CH ROBINSON", "TQL", "TOTAL QUALITY LOGISTICS", "RXO", "COYOTE", "UBER FREIGHT"]
-
-    is_broker = (
-        is_broker_auth or
-        has_broker_fields or
-        "BROKER" in entity_val or
-        any(b in name for b in known_broker_names)
-    )
-    entity_label = "BROKER" if is_broker else "CARRIER"
-
-    # --- CONTACT INFO & LOCATION ---
-    def flatten_dict_values(d):
-        vals = []
-        for v in d.values():
-            if isinstance(v, dict): vals.extend(flatten_dict_values(v))
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict): vals.extend(flatten_dict_values(item))
-                    else: vals.append(str(item))
-            else: vals.append(str(v))
-        return vals
-
-    all_payload_text = " ".join(flatten_dict_values(c)).upper()
-
-    phone = str(find_val_by_keys(c, ["phone", "cell_phone", "telephone", "phone_number"]) or "N/A").strip()
-    if phone.lower() in ["none", "null", "", "not listed"]: phone = "N/A"
-
-    email = str(find_val_by_keys(c, ["email_address", "email", "emailaddress"]) or "").strip()
-    if not email or email.lower() in ["none", "null", "not listed", "", "n/a"]:
-        emails_found = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', all_payload_text)
-        valid_emails = [e for e in emails_found if not any(x in e.lower() for x in ["carrierchk", "example.com"])]
-        email = valid_emails[0] if valid_emails else "Not Listed"
-
-    city = str(find_val_by_keys(c, ["phy_city", "city", "physical_city"]) or "").strip()
-    state = str(find_val_by_keys(c, ["phy_state", "state", "physical_state"]) or "").strip()
-    location = f"{city}, {state}".strip(", ") if city or state else "N/A"
-
-    return {
-        "MC Number": f"MC-{mc_number}",
-        "Carrier Name": name,
-        "Entity Type": entity_label,
-        "Operating Status": status_str,
-        "Phone Number": phone,
-        "Email Address": email,
-        "Location": location,
-        "Raw Payload": raw_data
-    }
-
-# --- STATE INIT ---
-for key, val in [("authenticated", False), ("current_user", None), ("session_token", None), 
-                 ("is_admin", False), ("login_time", None), ("running", False), 
-                 ("scraped_rows", []), ("current_mc", ""), ("last_db_check", 0.0), ("last_session_check", 0.0),
-                 ("reset_filters", False)]:
-    if key not in st.session_state: st.session_state[key] = val
-
-def force_logout(reason="Session Expired"):
-    if st.session_state.authenticated and st.session_state.current_user:
-        log_activity(st.session_state.current_user, "logout", reason)
-        try: supabase.table("users").update({"active_session_id": None}).eq("email", st.session_state.current_user).execute()
-        except Exception: pass
-    for k in ["authenticated", "current_user", "session_token", "is_admin", "running"]:
-        st.session_state[k] = False if isinstance(st.session_state[k], bool) else None
-    st.session_state.scraped_rows = []
-    st.session_state.current_mc = ""
-
+# AUTH FUNCTIONS
 def verify_active_session():
     if st.session_state.authenticated and st.session_state.current_user:
         now = time.time()
-        if now - st.session_state.last_session_check < 30.0: return True
+        if now - st.session_state.last_session_check < 30.0:
+            return True
         st.session_state.last_session_check = now
         try:
-            res = supabase.table("users").select("active_session_id").eq("email", st.session_state.current_user).execute()
-            if res.data and res.data[0].get("active_session_id") != st.session_state.session_token:
-                return False
-        except Exception: pass
+            if supabase:
+                res = supabase.table("users").select("active_session_id").eq("email", st.session_state.current_user).execute()
+                if res.data and res.data[0].get("active_session_id") != st.session_state.session_token:
+                    return False
+        except Exception:
+            pass
     return True
 
-# --- LOGIN GATE ---
-if not st.session_state.authenticated:
-    st.title("🔒 Security Access Required")
-    st.write("Enter credentials. Contact support if needed.")
-    c1, c2 = st.columns(2)
-    email_in = c1.text_input("Email:").strip().lower()
-    pass_in = c2.text_input("Password:", type="password")
-    if st.button("Verify & Unlock Engine", use_container_width=True):
+def login_user(email, password):
+    if not supabase:
+        return False, "Database connection failed"
+    try:
+        res = supabase.table("users").select("*").eq("email", email).execute()
+        if not res.data:
+            return False, "Invalid credentials"
+        user = res.data[0]
+        if user.get("password") != password:
+            return False, "Invalid credentials"
+        new_token = str(uuid.uuid4())
+        supabase.table("users").update({
+            "active_session_id": new_token,
+            "last_login": datetime.utcnow().isoformat()
+        }).eq("email", email).execute()
+        st.session_state.authenticated = True
+        st.session_state.current_user = email
+        st.session_state.is_admin = user.get("is_admin", False)
+        st.session_state.session_token = new_token
+        st.session_state.last_session_check = time.time()
+        return True, "Success"
+    except Exception as e:
+        return False, f"Login error: {e}"
+
+def logout_user():
+    if supabase and st.session_state.current_user:
         try:
-            res = supabase.table("users").select("*").eq("email", email_in).execute()
-        except Exception as e:
-            st.error("⚠️ Cannot connect to database. Your Supabase project may be paused.")
-            st.info("💡 Go to supabase.com → your project → Settings → Resume project")
-            st.stop()
-        if res.data and res.data[0]["password"] == pass_in:
-            token = str(uuid.uuid4())
-            supabase.table("users").update({"active_session_id": token}).eq("email", email_in).execute()
-            st.session_state.update({"authenticated": True, "current_user": email_in, "session_token": token,
-                                     "is_admin": res.data[0].get("is_admin", False), "login_time": time.time(),
-                                     "scraped_rows": [], "current_mc": ""})
-            log_activity(email_in, "login", "Success")
-            st.rerun()
-        else: st.error("Access denied.")
+            supabase.table("users").update({"active_session_id": None}).eq("email", st.session_state.current_user).execute()
+        except Exception:
+            pass
+    for key in ["authenticated", "current_user", "is_admin", "session_token", "harvesting"]:
+        st.session_state[key] = False if key != "session_token" else ""
+    st.rerun()
+
+# API FUNCTIONS
+@st.cache_data(ttl=300)
+def get_carrier_info(query, token, api_url):
+    if not query or not token:
+        return None
+    q = str(query).strip()
+    search_type = "mc" if q.isdigit() and len(q) <= 8 else "dot" if q.isdigit() else "email"
+    params = {"type": search_type, "value": q, "token": token}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Referer": "https://carrierchk.com/"
+    }
+    try:
+        s = requests.Session()
+        r = s.get(api_url, params=params, headers=headers, timeout=15)
+        if r.status_code == 200:
+            return r.json()
+        elif r.status_code == 429:
+            time.sleep(2)
+            r2 = s.get(api_url, params=params, headers=headers, timeout=15)
+            if r2.status_code == 200:
+                return r2.json()
+        return {"_error": f"HTTP {r.status_code}", "_status": r.status_code}
+    except requests.exceptions.Timeout:
+        return {"_error": "Request timed out", "_status": 0}
+    except Exception as e:
+        return {"_error": str(e), "_status": 0}
+
+def find_val_by_keys(d, keys):
+    if not isinstance(d, dict):
+        return None
+    for k in keys:
+        if k in d:
+            return d[k]
+    for v in d.values():
+        if isinstance(v, dict):
+            found = find_val_by_keys(v, keys)
+            if found is not None:
+                return found
+    return None
+
+def flatten_dict_values(d):
+    vals = []
+    if isinstance(d, dict):
+        for v in d.values():
+            if isinstance(v, dict):
+                vals.extend(flatten_dict_values(v))
+            elif isinstance(v, list):
+                for item in v:
+                    vals.extend(flatten_dict_values(item) if isinstance(item, dict) else [str(item)])
+            else:
+                vals.append(str(v))
+    return vals
+
+# ROBUST STATUS & BROKER PARSER
+def parse_carrier_data(c):
+    if not c or not isinstance(c, dict):
+        return None
+    if "_error" in c:
+        return None
+
+    data = c.get("carrier") or c.get("data") or c
+
+    # Basic info
+    name = find_val_by_keys(data, ["legal_name", "name", "company_name", "carrier_name", "dba_name"]) or "Unknown"
+    dot = find_val_by_keys(data, ["usdot_number", "dot_number", "usdot", "dot"]) or "N/A"
+    mc = find_val_by_keys(data, ["mc_number", "mc", "docket_number", "mc_docket"]) or "N/A"
+    phone = find_val_by_keys(data, ["phone", "business_phone", "contact_phone", "telephone"]) or "N/A"
+    email = find_val_by_keys(data, ["email", "business_email", "contact_email", "email_address"]) or "N/A"
+    city = find_val_by_keys(data, ["city", "physical_city", "business_city"]) or ""
+    state = find_val_by_keys(data, ["state", "physical_state", "business_state", "state_code"]) or ""
+    location = f"{city}, {state}".strip(", ") or "N/A"
+
+    # Broker detection
+    entity_type = find_val_by_keys(data, ["entity_type", "carrier_type", "operation_type", "company_type", "business_type"]) or ""
+    entity_val = str(entity_type).upper().strip()
+
+    broker_auth = find_val_by_keys(data, ["broker_authority_status", "brokerAuthStatus", "broker_status", "brokerAuthority", "broker_auth"]) or ""
+    common_auth = find_val_by_keys(data, ["common_authority_status", "commonAuthStatus", "common_status", "commonAuthority"]) or ""
+    contract_auth = find_val_by_keys(data, ["contract_authority_status", "contractAuthStatus", "contract_status", "contractAuthority"]) or ""
+
+    broker_auth_str = str(broker_auth).upper().strip()
+    common_auth_str = str(common_auth).upper().strip()
+    contract_auth_str = str(contract_auth).upper().strip()
+
+    is_broker_auth = broker_auth_str in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
+    has_common_auth = common_auth_str in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
+    has_contract_auth = contract_auth_str in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
+
+    is_broker = False
+    if entity_val in ["BROKER", "FREIGHT FORWARDER"]:
+        is_broker = True
+    elif is_broker_auth and not has_common_auth and not has_contract_auth:
+        is_broker = True
+    elif "BROKER" in entity_val and "CARRIER" not in entity_val:
+        is_broker = True
+
+    entity_label = "BROKER" if is_broker else "CARRIER"
+
+    # STATUS DETECTION - ROBUST
+    status_raw = find_val_by_keys(data, [
+        "operating_status", "status", "authority_status", "carrier_status",
+        "operation_status", "active_status", "current_status", "record_status"
+    ]) or ""
+    status_str_raw = str(status_raw).upper().strip()
+
+    is_active = None
+
+    # Exact match for explicit status values
+    if status_str_raw in ["ACTIVE", "AUTHORIZED", "AUTHORISED", "OPERATING", "OPERATIONAL", "A", "Y", "YES", "TRUE", "1"]:
+        is_active = True
+    elif status_str_raw in ["INACTIVE", "NOT AUTHORIZED", "NOT AUTHORISED", "REVOKED", "SUSPENDED", "NONE", "PENDING REVOCATION", "I", "N", "NO", "FALSE", "0"]:
+        is_active = False
+
+    # Check authority statuses individually
+    if is_active is None:
+        if has_common_auth or has_contract_auth or is_broker_auth:
+            is_active = True
+        elif common_auth_str in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"] or contract_auth_str in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"] or broker_auth_str in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"]:
+            is_active = False
+
+    # Check operation status code
+    if is_active is None:
+        op_status = find_val_by_keys(data, ["carrier_operation_status", "operation_status_code", "status_code"]) or ""
+        op_str = str(op_status).upper().strip()
+        if op_str == "A":
+            is_active = True
+        elif op_str in ["I", "N"]:
+            is_active = False
+
+    # Conservative default
+    if is_active is None:
+        is_active = False
+
+    status_str = "ACTIVE" if is_active else "INACTIVE"
+
+    # Insurance
+    bipd = find_val_by_keys(data, ["bipd_required", "bipd_amount", "bi_pd_amount"]) or "N/A"
+    cargo = find_val_by_keys(data, ["cargo_required", "cargo_amount", "cargo_coverage"]) or "N/A"
+
+    # Fleet
+    power = find_val_by_keys(data, ["power_units", "total_power_units", "fleet_size", "number_of_power_units"]) or "N/A"
+    drivers = find_val_by_keys(data, ["drivers", "total_drivers", "number_of_drivers", "driver_count"]) or "N/A"
+
+    # Safety
+    safety = find_val_by_keys(data, ["safety_rating", "safety_rating_date", "rating"]) or "Not Rated"
+
+    # Age / Risk
+    age_months = None
+    auth_date = find_val_by_keys(data, ["authority_date", "authority_issue_date", "date_authorized", "active_since"])
+    if auth_date:
+        try:
+            dt = pd.to_datetime(auth_date)
+            age_months = (datetime.now() - dt).days / 30.44
+        except Exception:
+            pass
+
+    risk_flag = ""
+    if not is_active:
+        risk_flag = "INACTIVE AUTHORITY"
+    elif age_months is not None and age_months < 6:
+        risk_flag = "NEW CARRIER (< 6 MO)"
+    else:
+        risk_flag = "VERIFIED"
+
+    return {
+        "name": name,
+        "dot": dot,
+        "mc": mc,
+        "phone": phone,
+        "email": email,
+        "location": location,
+        "status": status_str,
+        "is_active": is_active,
+        "entity_type": entity_label,
+        "is_broker": is_broker,
+        "bipd": bipd,
+        "cargo": cargo,
+        "power_units": power,
+        "drivers": drivers,
+        "safety": safety,
+        "risk_flag": risk_flag,
+        "age_months": age_months,
+        "raw": data
+    }
+
+# HARVEST ENGINE
+def run_harvest(start_mc, count, delay_ms, token, api_url):
+    results = []
+    current = int(start_mc)
+    for i in range(count):
+        if not st.session_state.harvesting:
+            break
+        res = get_carrier_info(str(current), token, api_url)
+        if res and "_error" not in res:
+            parsed = parse_carrier_data(res)
+            if parsed:
+                results.append(parsed)
+                st.session_state.harvested.append(parsed)
+                st.session_state.harvest_log.append(f"OK MC-{current}: {parsed['name']} [{parsed['status']}]")
+            else:
+                st.session_state.harvest_log.append(f"WARN MC-{current}: Parse failed")
+        else:
+            err = res.get("_error", "Unknown") if res else "No response"
+            st.session_state.harvest_log.append(f"ERR MC-{current}: {err}")
+        current += 1
+        if delay_ms > 0:
+            time.sleep(delay_ms / 1000.0)
+    st.session_state.harvesting = False
+    st.session_state.current_mc = current
+    return results
+
+# LOGIN PAGE
+if not st.session_state.authenticated:
+    st.markdown("<div class='app-title'>🚛 CarrierChk Pro</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color:#94a3b8; font-size:1.1rem; margin-bottom:40px;'>FMCSA Carrier Verification & Lead Harvesting Portal</p>", unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+        st.markdown("<h3 style='text-align:center; margin-bottom:24px;'>Secure Login</h3>", unsafe_allow_html=True)
+        email_in = st.text_input("Email", key="login_email", placeholder="your@email.com")
+        pass_in = st.text_input("Password", type="password", key="login_pass", placeholder="••••••••")
+        if st.button("Sign In", use_container_width=True):
+            if not supabase:
+                st.error("Cannot connect to database. Your Supabase project may be paused. Go to supabase.com and resume it.")
+            else:
+                ok, msg = login_user(email_in, pass_in)
+                if ok:
+                    st.success("Welcome back!")
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.error(msg)
+        st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
+# SESSION CHECK
 if not verify_active_session():
-    st.error("⚠️ Logged in from another tab or device.")
+    st.error("Logged in from another tab or device.")
     st.session_state.authenticated = False
     time.sleep(1.5)
     st.rerun()
 
-# --- SPEED CONFIG & AUTO-LOCK ---
-now = time.time()
-if now - st.session_state.last_db_check > 30.0:
-    cfg = get_system_config()
-    if cfg["override_global_speed"]:
-        st.session_state.cached_delay_ms = cfg["throttle_delay_ms"]
-        st.session_state.cached_speed_str = f"🚨 Forced Override ({cfg['throttle_delay_ms']:.2f} ms)"
-        _, st.session_state.cached_dur = get_user_settings(st.session_state.current_user)
-    else:
-        st.session_state.cached_delay_ms, st.session_state.cached_dur = get_user_settings(st.session_state.current_user)
-        st.session_state.cached_speed_str = f"👤 {st.session_state.cached_delay_ms:.2f} ms"
-    st.session_state.last_db_check = now
+# MAIN APP
+with st.sidebar:
+    st.markdown(f"<h3 style='color:#00d4ff;'>👤 {st.session_state.current_user}</h3>", unsafe_allow_html=True)
+    st.markdown(f"<p style='color:#94a3b8; font-size:0.85rem;'>{'Admin' if st.session_state.is_admin else 'User'}</p>", unsafe_allow_html=True)
+    st.divider()
+    if st.button("Logout", use_container_width=True):
+        logout_user()
+    if st.session_state.is_admin:
+        st.divider()
+        st.markdown("<p style='color:#ffa502; font-size:0.8rem;'>Admin Panel</p>", unsafe_allow_html=True)
 
-delay_ms = st.session_state.get("cached_delay_ms", 500.0)
-session_dur = st.session_state.get("cached_dur", 3.0)
-speed_str = st.session_state.get("cached_speed_str", "500 ms")
+st.markdown("<div class='app-title'>🚛 CarrierChk Pro</div>", unsafe_allow_html=True)
+st.markdown("<p style='color:#94a3b8; margin-bottom:24px;'>FMCSA Carrier Verification & Lead Harvesting</p>", unsafe_allow_html=True)
 
-if st.session_state.login_time and (time.time() - st.session_state.login_time >= session_dur * 3600):
-    force_logout("Auto-Expired")
-    st.warning("⏱️ Session Expired.")
-    st.rerun()
+tab1, tab2, tab3 = st.tabs(["Lookup", "Harvest Engine", "Leads"])
 
-# --- SIDEBAR ---
-st.sidebar.markdown(f"### 👤 Logged In As:\n`{st.session_state.current_user}`")
-rem_sec = max(0, int((session_dur * 3600) - (time.time() - st.session_state.login_time)))
-components.html(f"""
-<div style="font-family:monospace;font-size:15px;font-weight:bold;color:#ff4b4b;background:#0e1117;padding:8px;border-radius:5px;text-align:center;border:1px solid #30363d;">
-Auto-Locks In: <span id="clock">--</span>
-</div>
-<script>
-    let rem = {rem_sec};
-    function u(){{
-        if(rem<=0){{ location.reload(); return; }}
-        let h=Math.floor(rem/3600), m=Math.floor((rem%3600)/60), s=rem%60;
-        document.getElementById('clock').textContent = (h<10?'0'+h:h)+'h '+(m<10?'0'+m:m)+'m '+(s<10?'0'+s:s)+'s';
-        rem--;
-    }}
-    u(); setInterval(u, 1000);
-</script>""", height=55)
+# TAB 1: LOOKUP
+with tab1:
+    st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        search_query = st.text_input("Enter DOT, MC, Phone, or Email", placeholder="e.g. 1066434 or MC-322572", key="lookup_input")
+    with col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        search_btn = st.button("Search", use_container_width=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-if st.sidebar.button("🔓 Log Out", use_container_width=True):
-    force_logout("Manual Logout")
-    st.rerun()
+    if search_btn and search_query:
+        with st.spinner("Fetching carrier data..."):
+            raw = get_carrier_info(search_query, CARRIER_TOKEN, CARRIER_API_URL)
+        if raw and "_error" not in raw:
+            info = parse_carrier_data(raw)
+            if info:
+                st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+                c1, c2, c3 = st.columns([2, 1, 1])
+                with c1:
+                    st.markdown(f"<h2 style='margin:0;'>{info['name']}</h2>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='color:#94a3b8;'>📍 {info['location']}</p>", unsafe_allow_html=True)
+                with c2:
+                    badge_class = "badge-active" if info['is_active'] else "badge-inactive"
+                    st.markdown(f"<span class='{badge_class}'>{info['status']}</span>", unsafe_allow_html=True)
+                with c3:
+                    entity_badge = "badge-broker" if info['is_broker'] else "badge-active"
+                    st.markdown(f"<span class='{entity_badge}'>{info['entity_type']}</span>", unsafe_allow_html=True)
 
-show_admin = st.sidebar.checkbox("🛡️ Admin Dashboard", value=False) if st.session_state.is_admin else False
+                st.divider()
+                m1, m2, m3, m4 = st.columns(4)
+                with m1:
+                    st.markdown(f"<div class='metric-card'><div class='metric-value'>{info['dot']}</div><div class='metric-label'>USDOT</div></div>", unsafe_allow_html=True)
+                with m2:
+                    st.markdown(f"<div class='metric-card'><div class='metric-value'>{info['mc']}</div><div class='metric-label'>MC Number</div></div>", unsafe_allow_html=True)
+                with m3:
+                    st.markdown(f"<div class='metric-card'><div class='metric-value'>{info['power_units']}</div><div class='metric-label'>Power Units</div></div>", unsafe_allow_html=True)
+                with m4:
+                    st.markdown(f"<div class='metric-card'><div class='metric-value'>{info['drivers']}</div><div class='metric-label'>Drivers</div></div>", unsafe_allow_html=True)
 
-# --- ADMIN PANEL ---
-if show_admin and st.session_state.is_admin:
-    st.title("🛡️ Super Admin Control Dashboard")
-    t1, t2, t3 = st.tabs(["👥 User Management", "📊 Activity History Logs", "⚙️ System Configuration"])
-    
-    with t1:
-        st.subheader("➕ Register New User")
-        col_a1, col_a2, col_a3 = st.columns(3)
-        u_email = col_a1.text_input("New Email:").strip().lower()
-        u_pass = col_a2.text_input("Set Password:")
-        u_role = col_a3.selectbox("Role:", ["Standard User", "Super Admin"])
-        
-        col_a4, col_a5 = st.columns(2)
-        u_delay = col_a4.number_input("Speed Limit (ms):", value=500.0, step=10.0)
-        u_hrs = col_a5.number_input("Session Timeout (Hours):", value=3.0, step=0.5)
-        
-        if st.button("➕ Add User Account", use_container_width=True) and u_email and u_pass:
-            supabase.table("users").insert({
-                "email": u_email, "password": u_pass, "is_admin": (u_role == "Super Admin"), 
-                "delay_ms": u_delay, "session_duration_hours": u_hrs
-            }).execute()
-            st.success(f"Registered new account for {u_email}!")
-            st.rerun()
-
-        st.markdown("---")
-        st.subheader("📋 Registered Users Overview")
-        user_list = supabase.table("users").select("*").execute().data
-        if user_list:
-            st.dataframe(pd.DataFrame(user_list)[["email", "is_admin", "delay_ms", "session_duration_hours"]], use_container_width=True)
-
-    with t2:
-        st.subheader("📊 Target User Activity History")
-        logs = supabase.table("activity_logs").select("*").order("created_at", desc=True).limit(200).execute().data
-        if logs:
-            st.dataframe(pd.DataFrame(logs)[["created_at", "email", "action", "detail"]], use_container_width=True)
-
-    with t3:
-        st.subheader("⚙️ Global Speed Overrides")
-        cfg = get_system_config()
-        over = st.checkbox("Global Speed Override", value=cfg["override_global_speed"])
-        g_speed = st.number_input("Global Delay (ms):", value=cfg["throttle_delay_ms"])
-        if st.button("💾 Save Global Settings"):
-            update_global_config(g_speed, over)
-            st.success("Saved!")
-            st.rerun()
-
-# --- MAIN LIVE SINGLE-MC HARVESTER ENGINE ---
-if not show_admin:
-    st.title("🚚 Automated Carrier Harvester (Live Single-MC Engine)")
-    st.sidebar.success("CarrierChk API Active" if CARRIER_TOKEN else "Missing API Token")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.session_state.current_mc == "":
-            raw_mc = st.text_input("Starting MC Number:", placeholder="e.g. 1800000")
-            if raw_mc.isdigit(): st.session_state.current_mc = int(raw_mc)
+                st.divider()
+                d1, d2 = st.columns(2)
+                with d1:
+                    st.markdown("**Contact**")
+                    st.write(f"Phone: {info['phone']}")
+                    st.write(f"Email: {info['email']}")
+                    st.write(f"Safety: {info['safety']}")
+                with d2:
+                    st.markdown("**Insurance & Risk**")
+                    st.write(f"BI&PD: {info['bipd']}")
+                    st.write(f"Cargo: {info['cargo']}")
+                    st.write(f"Risk: {info['risk_flag']}")
+                st.markdown("</div>", unsafe_allow_html=True)
+            else:
+                st.error("Could not parse carrier data")
         else:
-            st.session_state.current_mc = st.number_input("Set MC Number:", min_value=1, value=int(st.session_state.current_mc), step=1)
-    with c2:
-        st.metric("Session Speed Enforced", speed_str)
+            err = raw.get("_error", "Unknown error") if raw else "No response"
+            st.error(f"API Error: {err}")
 
-    b1, b2, b3 = st.columns(3)
-    if b1.button("🚀 Start Live Engine", use_container_width=True):
-        if st.session_state.current_mc != "":
-            st.session_state.running = True
+# TAB 2: HARVEST ENGINE
+with tab2:
+    st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+    hc1, hc2, hc3 = st.columns(3)
+    with hc1:
+        start_mc = st.number_input("Start MC Number", min_value=1, value=int(st.session_state.get("current_mc", 1800000)), step=1, key="harvest_start")
+    with hc2:
+        harvest_count = st.number_input("Records to Harvest", min_value=1, max_value=500, value=50, step=10)
+    with hc3:
+        delay_ms = st.number_input("Delay (ms)", min_value=0, max_value=5000, value=500, step=100)
+
+    bc1, bc2, bc3 = st.columns(3)
+    with bc1:
+        if st.button("Start Live Engine", use_container_width=True, disabled=st.session_state.harvesting):
+            st.session_state.harvesting = True
+            st.session_state.harvest_log = []
             st.rerun()
-        else: st.error("Enter MC Number first.")
+    with bc2:
+        if st.button("STOP Engine", use_container_width=True, disabled=not st.session_state.harvesting):
+            st.session_state.harvesting = False
+            st.rerun()
+    with bc3:
+        if st.button("Clear Data", use_container_width=True):
+            st.session_state.harvested = []
+            st.session_state.harvest_log = []
+            st.session_state.harvesting = False
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    if b2.button("🛑 STOP Engine", use_container_width=True):
-        st.session_state.running = False
-        st.success("Stopped harvesting engine.")
-
-    if b3.button("🗑️ Clear Data", use_container_width=True):
-        st.session_state.scraped_rows = []
+    if st.session_state.harvesting:
+        st.markdown("<div class='harvest-active'>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#00d4ff; margin:0;'>Live Harvesting Active</h4>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color:#94a3b8;'>Collecting from MC-{int(start_mc)} | Delay: {delay_ms}ms</p>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        run_harvest(int(start_mc), int(harvest_count), int(delay_ms), CARRIER_TOKEN, CARRIER_API_URL)
         st.rerun()
 
-    status_box = st.empty()
+    if st.session_state.harvest_log:
+        st.markdown("<div class='glass-card' style='max-height:400px; overflow-y:auto;'>", unsafe_allow_html=True)
+        for log in reversed(st.session_state.harvest_log[-50:]):
+            st.write(log)
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    if st.session_state.running and st.session_state.current_mc != "":
-        current_mc_val = int(st.session_state.current_mc)
-        
-        # ═══════════════════════════════════════════════════════
-        # SLEEK LIVE HARVESTING INDICATOR
-        # ═══════════════════════════════════════════════════════
-        st.markdown(f"""
-        <div style="margin:1rem 0;padding:1.5rem 2rem;background:rgba(0,245,212,0.05);border:1px solid rgba(0,245,212,0.15);border-radius:16px;text-align:center;">
-            <div style="display:flex;align-items:center;justify-content:center;gap:1rem;margin-bottom:0.8rem;">
-                <div class="pulse-dot" style="width:12px;height:12px;background:#00f5d4;border-radius:50%;box-shadow:0 0 15px #00f5d4;"></div>
-                <span style="color:#00f5d4;font-weight:700;font-size:1.1rem;letter-spacing:1px;text-transform:uppercase;">Live Harvesting Active</span>
-                <div class="pulse-dot" style="width:12px;height:12px;background:#00f5d4;border-radius:50%;box-shadow:0 0 15px #00f5d4;"></div>
-            </div>
-            <div style="width:100%;height:4px;background:rgba(255,255,255,0.05);border-radius:2px;overflow:hidden;margin-bottom:0.8rem;">
-                <div class="shimmer-bar" style="height:100%;width:40%;background:linear-gradient(90deg,transparent,#00f5d4,transparent);border-radius:2px;"></div>
-            </div>
-            <p style="color:rgba(255,255,255,0.5);font-size:0.9rem;font-family:monospace;">Processing MC-{current_mc_val} • {{len(st.session_state.scraped_rows)}} records collected</p>
-        </div>
-        <style>
-            .pulse-dot {{ animation: pulse 1.2s ease-in-out infinite; }}
-            .pulse-dot:nth-child(3) {{ animation-delay: 0.6s; }}
-            @keyframes pulse {{ 0%,100% {{ opacity: 0.3; transform: scale(0.8); }} 50% {{ opacity: 1; transform: scale(1.2); }} }}
-            .shimmer-bar {{ animation: shimmer 1.5s linear infinite; }}
-            @keyframes shimmer {{ 0% {{ transform: translateX(-150%); }} 100% {{ transform: translateX(350%); }} }}
-        </style>
-        """, unsafe_allow_html=True)
-        
-        status_box.info(f"🔄 **Live Progress:** Processing **MC-{current_mc_val}**...")
+# TAB 3: LEADS
+with tab3:
+    if st.session_state.harvested:
+        df = pd.DataFrame(st.session_state.harvested)
+        df["status_clean"] = df["status"]
+        df["entity_clean"] = df["entity_type"]
 
-        status_code, raw_info = get_carrier_info(current_mc_val, CARRIER_TOKEN)
-        parsed = parse_carrier_data(current_mc_val, status_code, raw_info)
+        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+        f1, f2 = st.columns(2)
+        with f1:
+            status_filter = st.multiselect("Filter by Status", options=df["status_clean"].unique().tolist(), default=df["status_clean"].unique().tolist())
+        with f2:
+            entity_filter = st.multiselect("Filter by Type", options=df["entity_clean"].unique().tolist(), default=df["entity_clean"].unique().tolist())
 
-        st.session_state.scraped_rows.append(parsed)
-        st.session_state.current_mc = current_mc_val + 1
+        filtered = df[df["status_clean"].isin(status_filter) & df["entity_clean"].isin(entity_filter)]
+        st.dataframe(filtered[["name", "mc", "dot", "phone", "email", "location", "status", "entity_type", "risk_flag"]], use_container_width=True, hide_index=True)
 
-        log_activity(st.session_state.current_user, "search_live_single", f"Harvested MC-{current_mc_val}")
-
-        time.sleep(delay_ms / 1000.0)
-        st.rerun()
-
-    # --- FILTERING & DISPLAY ---
-    st.markdown("---")
-    if st.session_state.scraped_rows:
-        base_df = pd.DataFrame(st.session_state.scraped_rows)
-
-        for col in ["Entity Type", "Operating Status", "Carrier Name", "MC Number", "Location", "Email Address"]:
-            if col not in base_df.columns: base_df[col] = "N/A"
-            base_df[col] = base_df[col].fillna("N/A").astype(str)
-
-        with st.expander("🔍 Filter Collected Records", expanded=True):
-            r_col1, r_col2 = st.columns([4, 1])
-            with r_col2:
-                if st.button("🔄 Reset Filters", use_container_width=True):
-                    st.session_state.reset_filters = not st.session_state.get("reset_filters", False)
-                    st.rerun()
-
-            f1, f2, f3, f4 = st.columns(4)
-            sq = f1.text_input("🔎 Search Name / MC:", value="").strip().lower()
-            sel_ent = f2.selectbox("🚛 Filter Entity Type:", ["ALL"] + sorted(list(base_df["Entity Type"].unique())))
-            sel_stat = f3.selectbox("📌 Filter Status:", ["ALL"] + sorted(list(base_df["Operating Status"].unique())))
-            sel_state = f4.selectbox("📍 Filter State:", ["ALL"] + sorted(list(ALL_US_STATES)))
-
-        filtered_df = base_df.copy()
-        if sq:
-            filtered_df = filtered_df[filtered_df["Carrier Name"].str.lower().str.contains(sq) | filtered_df["MC Number"].str.lower().str.contains(sq)]
-        if sel_ent != "ALL":
-            filtered_df = filtered_df[filtered_df["Entity Type"] == sel_ent]
-        if sel_stat != "ALL":
-            filtered_df = filtered_df[filtered_df["Operating Status"] == sel_stat]
-        if sel_state != "ALL":
-            filtered_df = filtered_df[filtered_df["Location"].str.endswith(sel_state)]
-
-        st.caption(f"Showing **{len(filtered_df)}** of **{len(base_df)}** total harvested records.")
-
-        if len(filtered_df) == 0 and len(base_df) > 0:
-            st.warning("⚠️ Your filters are hiding all records. Click **'🔄 Reset Filters'** above or change your filter selections to view them.")
-
-        tab1, tab2, tab3 = st.tabs(["📋 Complete Master Log", "🎯 Verified Leads (Active Only)", "📧 Raw Active Email List"])
-        
-        with tab1:
-            display_df = filtered_df.drop(columns=["Raw Payload"], errors="ignore")
-            st.dataframe(display_df, use_container_width=True)
-            st.download_button("📥 Export Master Sheet to CSV", display_df.to_csv(index=False).encode('utf-8'), "Master_MC_Log.csv", "text/csv", use_container_width=True)
-
-        with tab2:
-            leads_df = filtered_df[
-                (filtered_df["Operating Status"].str.startswith("🟢 ACTIVE")) & 
-                (filtered_df["Email Address"].str.contains("@", na=False)) &
-                (~filtered_df["Email Address"].isin(["N/A", "Not Listed"]))
-            ].drop(columns=["Raw Payload"], errors="ignore")
-            st.dataframe(leads_df, use_container_width=True)
-            st.download_button("📥 Export Clean Active Leads to CSV", leads_df.to_csv(index=False).encode('utf-8'), "Active_Leads.csv", "text/csv", use_container_width=True)
-
-        with tab3:
-            emails = filtered_df[
-                (filtered_df["Operating Status"].str.startswith("🟢 ACTIVE")) & 
-                (filtered_df["Email Address"].str.contains("@", na=False)) &
-                (~filtered_df["Email Address"].isin(["N/A", "Not Listed"]))
-            ]["Email Address"].drop_duplicates()
-            st.text_area("Copy Emails:", value="\n".join(emails.tolist()), height=140)
-            st.download_button("📥 Export Emails CSV", pd.DataFrame({"Email Address": emails}).to_csv(index=False).encode('utf-8'), "Active_Emails.csv", "text/csv", use_container_width=True)
-
-
+        csv_buf = io.StringIO()
+        filtered[["name", "mc", "dot", "phone", "email", "location", "status", "entity_type", "power_units", "drivers", "safety", "risk_flag"]].to_csv(csv_buf, index=False)
+        st.download_button("Download CSV", csv_buf.getvalue(), file_name=f"carrier_leads_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", mime="text/csv", use_container_width=True)
+        st.markdown("</div>", unsafe_allow_html=True)
     else:
-        st.info("No records collected yet. Click 'Start Live Engine' to begin harvesting.")
+        st.info("No harvested data yet. Go to the Harvest Engine tab to start collecting leads.")
