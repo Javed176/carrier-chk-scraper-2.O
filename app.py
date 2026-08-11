@@ -220,114 +220,48 @@ def parse_carrier_data(mc_number, status_code, raw_data):
     ])
     allowed_str = str(allowed_val).upper().strip() if allowed_val is not None else ""
 
+    # ═══════════════════════════════════════════════════════
+    # FIXED STATUS DETECTION: Exact match for short keywords
+    # ═══════════════════════════════════════════════════════
     inactive_keywords = [
-        "INACTIVE", "REVOKED", "SUSPENDED", "CANCELED", "CANCELLED", 
-        "DENIED", "NOT AUTHORIZED", "OUT OF SERVICE", "NO AUTHORITY", "NOT ACTIVE", "I"
+        "INACTIVE", "REVOKED", "SUSPENDED", "CANCELED", "CANCELLED",
+        "DENIED", "NOT AUTHORIZED", "OUT OF SERVICE", "NO AUTHORITY", "NOT ACTIVE"
     ]
-    
     active_keywords = [
-        "ACTIVE", "AUTHORIZED", "AUTH", "YES", "TRUE", "OPERATING"
+        "ACTIVE", "AUTHORIZED", "YES", "TRUE", "OPERATING"
     ]
 
-    is_active = False
+    is_active = None
 
-    if any(kw in status_raw for kw in inactive_keywords) or allowed_val is False or allowed_str in ["N", "NO", "FALSE", "0", "INACTIVE", "REVOKED"]:
-        is_active = False
-    elif any(kw in status_raw for kw in active_keywords) or status_raw in ["A", "Y"] or allowed_val is True or allowed_str in ["Y", "YES", "TRUE", "1", "ACTIVE", "AUTHORIZED", "A"]:
-        is_active = True
-    else:
-        payload_text = json.dumps(c).upper()
-        if any(term in payload_text for term in ["NOT AUTHORIZED", "REVOKED", "SUSPENDED", "INACTIVE", "OUT OF SERVICE"]):
+    # Phase 1: Check explicit status string
+    if status_raw:
+        # Exact single-char codes (e.g., "A"=Active, "I"=Inactive)
+        if status_raw in ["I", "N"]:
             is_active = False
-        elif any(term in payload_text for term in ["AUTHORIZED", "ACTIVE", "COMMON AUTHORITY", "CONTRACT AUTHORITY"]):
+        elif status_raw in ["A", "Y"]:
+            is_active = True
+        # Multi-word substring checks
+        elif any(kw in status_raw for kw in inactive_keywords):
+            is_active = False
+        elif any(kw in status_raw for kw in active_keywords):
+            is_active = True
+
+    # Phase 2: Check boolean flags
+    if is_active is None:
+        if allowed_val is False or allowed_str in ["N", "NO", "FALSE", "0", "INACTIVE", "REVOKED"]:
+            is_active = False
+        elif allowed_val is True or allowed_str in ["Y", "YES", "TRUE", "1", "ACTIVE", "AUTHORIZED"]:
+            is_active = True
+
+    # Phase 3: Fallback payload scan (conservative)
+    if is_active is None:
+        payload_text = json.dumps(c).upper()
+        if any(term in payload_text for term in ["NOT AUTHORIZED", "AUTHORITY REVOKED", "SUSPENDED", "INACTIVE", "OUT OF SERVICE"]):
+            is_active = False
+        elif any(term in payload_text for term in ["ACTIVE AUTHORITY", "AUTHORIZED TO OPERATE", "OPERATING AUTHORITY"]):
             is_active = True
         else:
             is_active = False
-
-    status_str = "🟢 ACTIVE" if is_active else "🔴 INACTIVE"
-
-    # --- 2. ACCURATE BROKER VS CARRIER DETECTION ---
-    entity_val = str(find_val_by_keys(c, [
-        "entity_type", "entitytype", "operating_type", "operatingtype", 
-        "carrier_type", "type", "authority_type"
-    ]) or "").upper()
-
-    # ═══════════════════════════════════════════════════════
-    # FIXED: BROKER VS CARRIER DETECTION
-    # ═══════════════════════════════════════════════════════
-    def _has_broker_key(d, depth=0):
-        if not isinstance(d, dict) or depth > 5:
-            return False
-        broker_keys = ["broker_authority_status", "brokerAuthStatus", "broker_authority",
-                       "brokerAuthority", "broker_status", "is_broker", "broker_type"]
-        for k in d.keys():
-            if any(bk.lower() in k.lower() for bk in broker_keys):
-                return True
-            v = d[k]
-            if isinstance(v, dict) and _has_broker_key(v, depth+1):
-                return True
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict) and _has_broker_key(item, depth+1):
-                        return True
-        return False
-
-    broker_auth = find_val_by_keys(c, ["broker_authority_status", "brokerAuthStatus", "broker_authority", "brokerAuthority"])
-    is_broker_auth = str(broker_auth).upper() in ["Y", "ACTIVE", "AUTHORIZED", "TRUE", "A", "YES"]
-    has_broker_fields = _has_broker_key(c)
-
-    known_broker_names = ["BROKER", "BROKERAGE", "3PL", "GLOBAL LOGISTICS", "ECHO GLOBAL",
-                          "CH ROBINSON", "TQL", "TOTAL QUALITY LOGISTICS", "RXO", "COYOTE", "UBER FREIGHT"]
-
-    is_broker = (
-        is_broker_auth or
-        has_broker_fields or
-        "BROKER" in entity_val or
-        any(b in name for b in known_broker_names)
-    )
-    entity_label = "BROKER" if is_broker else "CARRIER"
-
-    # --- 3. CONTACT INFO & LOCATION ---
-    def flatten_dict_values(d):
-        vals = []
-        for v in d.values():
-            if isinstance(v, dict): vals.extend(flatten_dict_values(v))
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict): vals.extend(flatten_dict_values(item))
-                    else: vals.append(str(item))
-            else: vals.append(str(v))
-        return vals
-
-        broker_keys = ["broker_authority_status", "brokerAuthStatus", "broker_authority",
-                       "brokerAuthority", "broker_status", "is_broker", "broker_type"]
-        for k in d.keys():
-            if any(bk.lower() in k.lower() for bk in broker_keys):
-                return True
-            v = d[k]
-            if isinstance(v, dict) and has_broker_field(v):
-                return True
-            elif isinstance(v, list):
-                for item in v:
-                    if isinstance(item, dict) and has_broker_field(item):
-                        return True
-        return False
-
-    all_payload_text = " ".join(flatten_dict_values(c)).upper()
-
-    phone = str(find_val_by_keys(c, ["phone", "cell_phone", "telephone", "phone_number"]) or "N/A").strip()
-    if phone.lower() in ["none", "null", ""]: phone = "N/A"
-
-    email = str(find_val_by_keys(c, ["email_address", "email", "emailaddress"]) or "").strip()
-    if not email or email.lower() in ["none", "null", "not listed", ""]:
-        emails_found = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', all_payload_text)
-        valid_emails = [e for e in emails_found if not any(x in e.lower() for x in ["carrierchk", "example.com"])]
-        email = valid_emails[0] if valid_emails else "Not Listed"
-
-    city = str(find_val_by_keys(c, ["phy_city", "city", "physical_city"]) or "").strip()
-    state = str(find_val_by_keys(c, ["phy_state", "state", "physical_state"]) or "").strip()
-    location = f"{city}, {state}".strip(", ") if city or state else "N/A"
-
     return {
         "MC Number": f"MC-{mc_number}",
         "Carrier Name": name,
@@ -376,7 +310,12 @@ if not st.session_state.authenticated:
     email_in = c1.text_input("Email:").strip().lower()
     pass_in = c2.text_input("Password:", type="password")
     if st.button("Verify & Unlock Engine", use_container_width=True):
-        res = supabase.table("users").select("*").eq("email", email_in).execute()
+        try:
+            res = supabase.table("users").select("*").eq("email", email_in).execute()
+        except Exception as e:
+            st.error("⚠️ Cannot connect to database. Your Supabase project may be paused.")
+            st.info("💡 Go to supabase.com → your project → Settings → Resume project")
+            st.stop()
         if res.data and res.data[0]["password"] == pass_in:
             token = str(uuid.uuid4())
             supabase.table("users").update({"active_session_id": token}).eq("email", email_in).execute()
