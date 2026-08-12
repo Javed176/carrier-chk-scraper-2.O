@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 from datetime import datetime
 
+import random
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # ── Try importing local modules; fall back to built-ins ──────────────────────
@@ -28,8 +29,8 @@ except ImportError:
         def log_activity(self, u, a, d=""): pass
         def get_activity_logs(self, limit=200): return pd.DataFrame()
         def get_all_users(self): return []
-        def create_user(self, *a, **k): return False, "db_manager.py missing."
-        def update_user_config(self, *a, **k): return False, "db_manager.py missing."
+        def create_user(self, *a, **k): return False, "db_manager.py not found or DB connection failed. Check that db_manager.py exists and Supabase is connected."
+        def update_user_config(self, *a, **k): return False, "db_manager.py not found or DB connection failed."
     db = DummyDB()
 
 try:
@@ -267,21 +268,29 @@ except ImportError:
                 email = str(e).strip()
                 break
 
-        # Location — AGGRESSIVE: any key containing "city" or "state"
+        # Location — SMART extraction
+        # City: any key containing "city"
         city_candidates = _collect_all_by_key_part(data, "city")
-        state_candidates = _collect_all_by_key_part(data, "state")
-
         city = ""
         for c_val in city_candidates:
-            if c_val and str(c_val).strip() and str(c_val).strip().lower() not in ("none", "null", "", "—"):
-                city = str(c_val).strip()
+            c_str = str(c_val).strip() if c_val else ""
+            if c_str and c_str.lower() not in ("none", "null", "", "—") and not c_str.isdigit():
+                city = c_str
                 break
 
-        state = ""
-        for s_val in state_candidates:
-            if s_val and str(s_val).strip() and str(s_val).strip().lower() not in ("none", "null", "", "—"):
-                state = str(s_val).strip()
-                break
+        # State: prefer exact keys first, then partial, but SKIP pure numbers
+        state = str(_find_val(data, ["state_code", "state", "physical_state", "business_state", "mailing_state"]) or "").strip()
+        if not state or state.isdigit():
+            state_candidates = _collect_all_by_key_part(data, "state")
+            for s_val in state_candidates:
+                s_str = str(s_val).strip() if s_val else ""
+                # Skip pure numbers, "none", "null", empty
+                if not s_str or s_str.lower() in ("none", "null", "", "—") or s_str.isdigit():
+                    continue
+                # Prefer 2-letter state codes or real state names (not random strings)
+                if len(s_str) <= 2 or len(s_str) > 3:
+                    state = s_str
+                    break
 
         location = f"{city}, {state}".strip(", ") or "—"
 
