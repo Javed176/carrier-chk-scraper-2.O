@@ -128,7 +128,7 @@ except ImportError:
         return False
 
     def scrape_mc(mc):
-        """Built-in scraper using carrierchk API."""
+        """Built-in scraper using carrierchk API with exponential backoff."""
         token = st.secrets.get("CARRIER_TOKEN", CARRIER_TOKEN)
         api_url = st.secrets.get("CARRIER_API_URL", CARRIER_API_URL)
 
@@ -146,90 +146,129 @@ except ImportError:
 
         params = {"type": "mc", "value": str(int(mc)).strip(), "token": token}
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json",
-            "Referer": "https://carrierchk.com/"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://carrierchk.com/",
+            "Origin": "https://carrierchk.com"
         }
 
-        try:
-            r = http_session.get(api_url, params=params, headers=headers, timeout=15)
-            if r.status_code == 200:
-                c = r.json()
-                data = c.get("carrier") or c.get("data") or c
-
-                name = _find_val(data, ["legal_name", "name", "company_name", "carrier_name", "dba_name"]) or "Unknown"
-                dot = _find_val(data, ["usdot_number", "dot_number", "usdot"]) or "N/A"
-                phone = _find_val(data, ["phone", "business_phone", "contact_phone"]) or "—"
-                email = _find_val(data, ["email", "business_email", "contact_email"]) or "—"
-                city = str(_find_val(data, ["city", "physical_city"]) or "").strip()
-                state = str(_find_val(data, ["state", "physical_state", "state_code"]) or "").strip()
-                location = f"{city}, {state}".strip(", ") or "—"
-
-                is_broker = _is_broker(data)
-                status = _normalize_status(data)
-
-                if is_broker:
-                    return {
-                        "MC Number": f"BROKER MC-{mc:07d}",
-                        "Broker Name": name,
-                        "Carrier Name": name,
-                        "Entity Type": "BROKER",
-                        "Operating Status": status,
-                        "Phone Number": phone,
-                        "Email Address": email,
-                        "Location": location,
-                        "USDOT": dot,
-                        "_found": True
-                    }
+        # Exponential backoff: try up to 4 times (1s, 2s, 4s, 8s)
+        for attempt in range(4):
+            try:
+                r = http_session.get(api_url, params=params, headers=headers, timeout=15)
+                if r.status_code == 200:
+                    break
+                elif r.status_code == 429:
+                    sleep_time = (2 ** attempt) + 0.5  # 1.5s, 2.5s, 4.5s, 8.5s
+                    time.sleep(sleep_time)
+                    continue
                 else:
                     return {
                         "MC Number": f"MC-{mc:07d}",
-                        "Carrier Name": name,
-                        "Broker Name": "",
+                        "Carrier Name": f"HTTP {r.status_code}",
                         "Entity Type": "CARRIER",
-                        "Operating Status": status,
-                        "Phone Number": phone,
-                        "Email Address": email,
-                        "Location": location,
-                        "USDOT": dot,
-                        "_found": True
+                        "Operating Status": "NOT FOUND",
+                        "Phone Number": "—",
+                        "Email Address": "—",
+                        "Location": "—",
+                        "_found": False
                     }
-            elif r.status_code == 429:
-                time.sleep(2)
-                r2 = http_session.get(api_url, params=params, headers=headers, timeout=15)
-                if r2.status_code == 200:
-                    return scrape_mc(mc)  # retry returns fresh result
-                return {
-                    "MC Number": f"MC-{mc:07d}",
-                    "Carrier Name": f"Rate Limited (429)",
-                    "Entity Type": "CARRIER",
-                    "Operating Status": "NOT FOUND",
-                    "Phone Number": "—",
-                    "Email Address": "—",
-                    "Location": "—",
-                    "_found": False
-                }
-            else:
-                return {
-                    "MC Number": f"MC-{mc:07d}",
-                    "Carrier Name": f"HTTP {r.status_code}",
-                    "Entity Type": "CARRIER",
-                    "Operating Status": "NOT FOUND",
-                    "Phone Number": "—",
-                    "Email Address": "—",
-                    "Location": "—",
-                    "_found": False
-                }
-        except Exception as e:
+            except Exception as e:
+                if attempt == 3:
+                    return {
+                        "MC Number": f"MC-{mc:07d}",
+                        "Carrier Name": f"Error: {str(e)[:40]}",
+                        "Entity Type": "CARRIER",
+                        "Operating Status": "NOT FOUND",
+                        "Phone Number": "—",
+                        "Email Address": "—",
+                        "Location": "—",
+                        "_found": False
+                    }
+                time.sleep(1)
+        else:
+            # All retries exhausted for 429
             return {
                 "MC Number": f"MC-{mc:07d}",
-                "Carrier Name": f"Error: {str(e)[:40]}",
+                "Carrier Name": "Rate Limited (429)",
                 "Entity Type": "CARRIER",
                 "Operating Status": "NOT FOUND",
                 "Phone Number": "—",
                 "Email Address": "—",
                 "Location": "—",
                 "_found": False
+            }
+
+        try:
+            c = r.json()
+        except Exception:
+            return {
+                "MC Number": f"MC-{mc:07d}",
+                "Carrier Name": "Invalid JSON",
+                "Entity Type": "CARRIER",
+                "Operating Status": "NOT FOUND",
+                "Phone Number": "—",
+                "Email Address": "—",
+                "Location": "—",
+                "_found": False
+            }
+
+        data = c.get("carrier") or c.get("data") or c
+
+        # Name
+        name = _find_val(data, ["legal_name", "name", "company_name", "carrier_name", "dba_name", "doing_business_as"]) or "Unknown"
+
+        # DOT
+        dot = _find_val(data, ["usdot_number", "dot_number", "usdot", "dot"]) or "N/A"
+
+        # Phone - search deeper
+        phone = _find_val(data, ["phone", "business_phone", "contact_phone", "telephone", "cell_phone", "fax"]) or "—"
+
+        # Email - search deeper with more keys
+        email = _find_val(data, [
+            "email", "business_email", "contact_email", "email_address",
+            "e_mail", "mail", "company_email", "dispatch_email"
+        ]) or "—"
+
+        # Location - try multiple city/state combos
+        city = str(_find_val(data, ["city", "physical_city", "business_city", "mailing_city", "pm_city"]) or "").strip()
+        state = str(_find_val(data, ["state", "physical_state", "business_state", "state_code", "mailing_state", "pm_state"]) or "").strip()
+        if not city and not state:
+            # Try nested address object
+            addr = _find_val(data, ["address", "physical_address", "business_address", "mailing_address"])
+            if isinstance(addr, dict):
+                city = str(addr.get("city", "")).strip()
+                state = str(addr.get("state", addr.get("state_code", ""))).strip()
+        location = f"{city}, {state}".strip(", ") or "—"
+
+        is_broker = _is_broker(data)
+        status = _normalize_status(data)
+
+        if is_broker:
+            return {
+                "MC Number": f"BROKER MC-{mc:07d}",
+                "Broker Name": name,
+                "Carrier Name": name,
+                "Entity Type": "BROKER",
+                "Operating Status": status,
+                "Phone Number": phone,
+                "Email Address": email,
+                "Location": location,
+                "USDOT": dot,
+                "_found": True
+            }
+        else:
+            return {
+                "MC Number": f"MC-{mc:07d}",
+                "Carrier Name": name,
+                "Broker Name": "",
+                "Entity Type": "CARRIER",
+                "Operating Status": status,
+                "Phone Number": phone,
+                "Email Address": email,
+                "Location": location,
+                "USDOT": dot,
+                "_found": True
             }
 
 
