@@ -41,7 +41,9 @@ except ImportError:
 
     http_session = requests.Session()
 
+
     def _find_val(d, keys):
+        """Find first matching key in dict or nested dicts."""
         if not isinstance(d, dict):
             return None
         for k in keys:
@@ -54,26 +56,52 @@ except ImportError:
                     return found
         return None
 
+    def _find_by_key_part(d, part, depth=0):
+        """Recursively find ANY key containing 'part' substring. Returns first match."""
+        if depth > 5 or not isinstance(d, dict):
+            return None
+        for k, v in d.items():
+            if part in k.lower():
+                return v
+            if isinstance(v, dict):
+                found = _find_by_key_part(v, part, depth + 1)
+                if found is not None:
+                    return found
+            elif isinstance(v, list):
+                for item in v:
+                    found = _find_by_key_part(item, part, depth + 1)
+                    if found is not None:
+                        return found
+        return None
+
+    def _collect_all_by_key_part(d, part, depth=0):
+        """Recursively collect ALL values from keys containing 'part'."""
+        results = []
+        if depth > 5 or not isinstance(d, dict):
+            return results
+        for k, v in d.items():
+            if part in k.lower():
+                results.append(v)
+            if isinstance(v, dict):
+                results.extend(_collect_all_by_key_part(v, part, depth + 1))
+            elif isinstance(v, list):
+                for item in v:
+                    results.extend(_collect_all_by_key_part(item, part, depth + 1))
+        return results
+
     def _normalize_status(data):
-        """
-        ROBUST STATUS DETECTION.
-        Returns: "ACTIVE", "INACTIVE", or "NOT AUTHORIZED"
-        """
-        # 1. Check explicit operating_status field
+        """ROBUST STATUS DETECTION."""
         status_raw = _find_val(data, [
             "operating_status", "status", "authority_status", "carrier_status",
             "operation_status", "active_status", "current_status", "record_status"
         ]) or ""
         s = str(status_raw).upper().strip()
 
-        # Exact matches for active
         if s in ["ACTIVE", "AUTHORIZED", "AUTHORISED", "OPERATING", "OPERATIONAL", "A", "Y", "YES", "TRUE", "1"]:
             return "ACTIVE"
-        # Exact matches for inactive
         if s in ["INACTIVE", "NOT AUTHORIZED", "NOT AUTHORISED", "REVOKED", "SUSPENDED", "NONE", "PENDING REVOCATION", "I", "N", "NO", "FALSE", "0"]:
             return "INACTIVE"
 
-        # 2. Check individual authority statuses
         common = str(_find_val(data, ["common_authority_status", "commonAuthStatus", "common_status"]) or "").upper().strip()
         contract = str(_find_val(data, ["contract_authority_status", "contractAuthStatus", "contract_status"]) or "").upper().strip()
         broker = str(_find_val(data, ["broker_authority_status", "brokerAuthStatus", "broker_status"]) or "").upper().strip()
@@ -86,27 +114,20 @@ except ImportError:
         contract_inactive = contract in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"]
         broker_inactive = broker in ["I", "INACTIVE", "N", "NONE", "REVOKED", "SUSPENDED"]
 
-        # If ANY authority is active → ACTIVE
         if common_active or contract_active or broker_active:
             return "ACTIVE"
-        # If ALL present authorities are inactive → INACTIVE
         if common_inactive or contract_inactive or broker_inactive:
             return "INACTIVE"
 
-        # 3. Check operation status code
         op = str(_find_val(data, ["carrier_operation_status", "operation_status_code", "status_code"]) or "").upper().strip()
         if op == "A":
             return "ACTIVE"
         if op in ["I", "N"]:
             return "INACTIVE"
 
-        # 4. Conservative fallback
         return "INACTIVE"
 
     def _is_broker(data):
-        """
-        Detect if entity is a broker.
-        """
         entity = str(_find_val(data, ["entity_type", "carrier_type", "operation_type", "company_type"]) or "").upper().strip()
         if entity in ["BROKER", "FREIGHT FORWARDER"]:
             return True
@@ -121,14 +142,12 @@ except ImportError:
         common_active = common_auth in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
         contract_active = contract_auth in ["A", "ACTIVE", "Y", "YES", "TRUE", "1", "AUTHORIZED"]
 
-        # Broker auth active but no carrier auth → broker
         if broker_active and not common_active and not contract_active:
             return True
-
         return False
 
     def scrape_mc(mc):
-        """Built-in scraper using carrierchk API with exponential backoff."""
+        """Built-in scraper using carrierchk API with aggressive backoff."""
         token = st.secrets.get("CARRIER_TOKEN", CARRIER_TOKEN)
         api_url = st.secrets.get("CARRIER_API_URL", CARRIER_API_URL)
 
@@ -141,7 +160,8 @@ except ImportError:
                 "Phone Number": "—",
                 "Email Address": "—",
                 "Location": "—",
-                "_found": False
+                "_found": False,
+                "_raw": {}
             }
 
         params = {"type": "mc", "value": str(int(mc)).strip(), "token": token}
@@ -152,14 +172,21 @@ except ImportError:
             "Origin": "https://carrierchk.com"
         }
 
-        # Exponential backoff: try up to 4 times (1s, 2s, 4s, 8s)
-        for attempt in range(4):
+        # Aggressive exponential backoff with jitter
+        last_status = None
+        for attempt in range(5):
             try:
                 r = http_session.get(api_url, params=params, headers=headers, timeout=15)
+                last_status = r.status_code
                 if r.status_code == 200:
                     break
                 elif r.status_code == 429:
-                    sleep_time = (2 ** attempt) + 0.5  # 1.5s, 2.5s, 4.5s, 8.5s
+                    sleep_time = (2 ** attempt) + random.uniform(0.5, 2.0)
+                    time.sleep(sleep_time)
+                    continue
+                elif r.status_code in [500, 502, 503, 504]:
+                    # Server error — might be "not found" or overloaded
+                    sleep_time = 1.0 + random.uniform(0.5, 1.5)
                     time.sleep(sleep_time)
                     continue
                 else:
@@ -171,10 +198,11 @@ except ImportError:
                         "Phone Number": "—",
                         "Email Address": "—",
                         "Location": "—",
-                        "_found": False
+                        "_found": False,
+                        "_raw": {}
                     }
             except Exception as e:
-                if attempt == 3:
+                if attempt == 4:
                     return {
                         "MC Number": f"MC-{mc:07d}",
                         "Carrier Name": f"Error: {str(e)[:40]}",
@@ -183,20 +211,21 @@ except ImportError:
                         "Phone Number": "—",
                         "Email Address": "—",
                         "Location": "—",
-                        "_found": False
+                        "_found": False,
+                        "_raw": {}
                     }
-                time.sleep(1)
+                time.sleep(1 + random.uniform(0.5, 1.0))
         else:
-            # All retries exhausted for 429
             return {
                 "MC Number": f"MC-{mc:07d}",
-                "Carrier Name": "Rate Limited (429)",
+                "Carrier Name": f"Rate Limited ({last_status})" if last_status == 429 else f"Server Error ({last_status})",
                 "Entity Type": "CARRIER",
                 "Operating Status": "NOT FOUND",
                 "Phone Number": "—",
                 "Email Address": "—",
                 "Location": "—",
-                "_found": False
+                "_found": False,
+                "_raw": {}
             }
 
         try:
@@ -210,7 +239,8 @@ except ImportError:
                 "Phone Number": "—",
                 "Email Address": "—",
                 "Location": "—",
-                "_found": False
+                "_found": False,
+                "_raw": {}
             }
 
         data = c.get("carrier") or c.get("data") or c
@@ -221,24 +251,38 @@ except ImportError:
         # DOT
         dot = _find_val(data, ["usdot_number", "dot_number", "usdot", "dot"]) or "N/A"
 
-        # Phone - search deeper
-        phone = _find_val(data, ["phone", "business_phone", "contact_phone", "telephone", "cell_phone", "fax"]) or "—"
+        # Phone — AGGRESSIVE: any key containing "phone" or "tel"
+        phone_candidates = _collect_all_by_key_part(data, "phone") + _collect_all_by_key_part(data, "tel")
+        phone = "—"
+        for p in phone_candidates:
+            if p and str(p).strip() and str(p).strip() not in ("—", "", "None", "null"):
+                phone = str(p).strip()
+                break
 
-        # Email - search deeper with more keys
-        email = _find_val(data, [
-            "email", "business_email", "contact_email", "email_address",
-            "e_mail", "mail", "company_email", "dispatch_email"
-        ]) or "—"
+        # Email — AGGRESSIVE: any key containing "email" or "mail"
+        email_candidates = _collect_all_by_key_part(data, "email") + _collect_all_by_key_part(data, "mail")
+        email = "—"
+        for e in email_candidates:
+            if e and str(e).strip() and "@" in str(e):
+                email = str(e).strip()
+                break
 
-        # Location - try multiple city/state combos
-        city = str(_find_val(data, ["city", "physical_city", "business_city", "mailing_city", "pm_city"]) or "").strip()
-        state = str(_find_val(data, ["state", "physical_state", "business_state", "state_code", "mailing_state", "pm_state"]) or "").strip()
-        if not city and not state:
-            # Try nested address object
-            addr = _find_val(data, ["address", "physical_address", "business_address", "mailing_address"])
-            if isinstance(addr, dict):
-                city = str(addr.get("city", "")).strip()
-                state = str(addr.get("state", addr.get("state_code", ""))).strip()
+        # Location — AGGRESSIVE: any key containing "city" or "state"
+        city_candidates = _collect_all_by_key_part(data, "city")
+        state_candidates = _collect_all_by_key_part(data, "state")
+
+        city = ""
+        for c_val in city_candidates:
+            if c_val and str(c_val).strip() and str(c_val).strip().lower() not in ("none", "null", "", "—"):
+                city = str(c_val).strip()
+                break
+
+        state = ""
+        for s_val in state_candidates:
+            if s_val and str(s_val).strip() and str(s_val).strip().lower() not in ("none", "null", "", "—"):
+                state = str(s_val).strip()
+                break
+
         location = f"{city}, {state}".strip(", ") or "—"
 
         is_broker = _is_broker(data)
@@ -255,7 +299,8 @@ except ImportError:
                 "Email Address": email,
                 "Location": location,
                 "USDOT": dot,
-                "_found": True
+                "_found": True,
+                "_raw": data
             }
         else:
             return {
@@ -268,7 +313,8 @@ except ImportError:
                 "Email Address": email,
                 "Location": location,
                 "USDOT": dot,
-                "_found": True
+                "_found": True,
+                "_raw": data
             }
 
 
@@ -854,10 +900,11 @@ if filtered_results:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "📋  Complete Master Log",
         "✅  Verified Leads (Active Only)",
         "📧  Raw Active Email List",
+        "🔍  Debug API Response",
     ])
 
     with tab1:
@@ -926,6 +973,44 @@ if filtered_results:
                 '📧 No emails found yet. Active entities without emails won\'t appear here.</p>',
                 unsafe_allow_html=True,
             )
+
+    with tab4:
+        st.markdown("<div class='input-card'>", unsafe_allow_html=True)
+        debug_mc = st.text_input("Enter MC Number to Debug", placeholder="e.g. 1800003", key="debug_mc_input")
+        if st.button("Fetch & Show Raw JSON", key="debug_btn"):
+            if debug_mc:
+                with st.spinner("Fetching..."):
+                    token = st.secrets.get("CARRIER_TOKEN", CARRIER_TOKEN)
+                    api_url = st.secrets.get("CARRIER_API_URL", CARRIER_API_URL)
+                    params = {"type": "mc", "value": str(debug_mc).strip(), "token": token}
+                    headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Accept": "application/json",
+                        "Referer": "https://carrierchk.com/"
+                    }
+                    try:
+                        r = http_session.get(api_url, params=params, headers=headers, timeout=15)
+                        st.write(f"**Status Code:** {r.status_code}")
+                        if r.status_code == 200:
+                            data = r.json()
+                            st.json(data)
+                            # Also show what our parser extracted
+                            inner = data.get("carrier") or data.get("data") or data
+                            st.write("---")
+                            st.write("**Parsed by our scraper:**")
+                            cities = _collect_all_by_key_part(inner, "city")
+                            states = _collect_all_by_key_part(inner, "state")
+                            emails = _collect_all_by_key_part(inner, "email") + _collect_all_by_key_part(inner, "mail")
+                            phones = _collect_all_by_key_part(inner, "phone") + _collect_all_by_key_part(inner, "tel")
+                            st.write(f"Cities found: {cities}")
+                            st.write(f"States found: {states}")
+                            st.write(f"Emails found: {emails}")
+                            st.write(f"Phones found: {phones}")
+                        else:
+                            st.error(f"HTTP {r.status_code}: {r.text[:500]}")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+        st.markdown("</div>", unsafe_allow_html=True)
 
 else:
     st.markdown(
